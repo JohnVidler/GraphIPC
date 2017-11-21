@@ -17,6 +17,13 @@
  */
 #pragma ONCE;
 
-#include <stdint.h>
+#define ROUTER_BACKLOG 10
+#define ROUTER_PORT    (const char *)("19000")
+#define CONTROL_PORT   (const char *)("19001")
 
-uint32_t strlen_array( unsigned int offset, unsigned int length, char ** array );
+#define MAX_CLIENTS 1024
+#define MAX_ROUTES  1024
+
+#define UID_INVALID 0
+
+typedef uint32_t UID_t;

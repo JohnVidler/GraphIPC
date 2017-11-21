@@ -3,7 +3,11 @@ project(GraphIPC)
 
 set(CMAKE_C_STANDARD 99)
 
-set(SOURCE_FILES GraphWrap.c utility.c utility.h)
-add_executable( GraphWrap ${SOURCE_FILES} )
+find_package( Threads )
+
+add_executable( GraphWrap GraphWrap.c utility.c GraphNetwork.h )
 
 add_executable( ArgTest ArgTest.c )
+
+add_executable( GraphRouter GraphRouter.c utility.c GraphNetwork.h )
+target_link_libraries( GraphRouter ${CMAKE_THREAD_LIBS_INIT} )
