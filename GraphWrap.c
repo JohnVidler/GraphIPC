@@ -218,5 +218,9 @@ int main(int argc, char ** argv ) {
     close( PIPE_READ(wrap_stdout) );
     close( PIPE_WRITE(wrap_stdout) );
 
+    // Close the syslog, if we opened a connection to it
+    if( arg_daemonize )
+        closelog();
+
     return 0;
 }
