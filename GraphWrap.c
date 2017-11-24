@@ -21,10 +21,12 @@
 #include <wait.h>
 #include <errno.h>
 #include "utility.h"
+#include "GraphNetwork.h"
 #include <string.h>
 #include <stdbool.h>
 #include <sys/stat.h>
 #include <syslog.h>
+#include <netdb.h>
 
 #define LOG_NAME "GraphWrap"
 
@@ -84,6 +86,48 @@ void daemonize() {
 
     // Daemon is online
     openlog( LOG_NAME, LOG_PID, LOG_DAEMON );
+}
+
+int routerConnect() {
+    struct addrinfo hints;
+    struct addrinfo *clientinfo;
+    int retval;
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    // Hard coded loopback, for now... -John
+    if ((retval = getaddrinfo("127.0.0.1", ROUTER_PORT, &hints, &clientinfo)) != 0) {
+        //fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(retval));
+        fail( "Unable to get a valid local socket to use... no more FDs available?" );
+    }
+
+    // loop through all the results and connect to the first we can
+    int sockfd = -1;
+    struct addrinfo *p;
+    for(p = clientinfo; p != NULL; p = p->ai_next) {
+        if ((sockfd = socket(p->ai_family, p->ai_socktype,
+                             p->ai_protocol)) == -1) {
+            perror("client: socket");
+            continue;
+        }
+
+        if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+            close(sockfd);
+            perror("client: connect");
+            continue;
+        }
+
+        break;
+    }
+
+    if (p == NULL)
+        fail( "Unable to connect to the graph router... is one running?" );
+
+    freeaddrinfo(clientinfo); // all done with this structure
+
+    return sockfd;
 }
 
 int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** argv ) {
@@ -170,12 +214,20 @@ int main(int argc, char ** argv ) {
     fprintf( writePipe, "As he crossed toward the pharmacy at the corner he involuntarily turned his head because of a burst of light that had ricocheted from his temple, and saw, with that quick smile with which we greet a rainbow or a rose, a blindingly white parallelogram of sky being unloaded from the van—a dresser with mirrors across which, as across a cinema screen, passed a flawlessly clear reflection of boughs sliding and swaying not arboreally, but with a human vacillation, produced by the nature of those who were carrying this sky, these boughs, this gliding façade.\n" );
     fflush( writePipe );
 
+    // Connect to the local router.
+    int router_fd = routerConnect();
+
+    if( router_fd < 0 )
+        fail( "Unable to get a connection to the graph router. STOP." );
 
     struct timeval timeout;
 
     fd_set pipe_io;
     FD_ZERO( &pipe_io );
     FD_SET( PIPE_READ(wrap_stdout), &pipe_io );
+    FD_SET( router_fd, &pipe_io );
+
+    // ToDo: DON'T USE SELECT - USE POLL INSTEAD (select not deprecated, but way less performant) -John
 
     int status = 0;
     while( status == 0 ) {
