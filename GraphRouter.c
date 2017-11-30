@@ -17,24 +17,28 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include <unistd.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <netdb.h>
-#include <arpa/inet.h>
-#include <wait.h>
 #include <pthread.h>
 #include <assert.h>
 #include "GraphNetwork.h"
+#include <glib-2.0/glib.h>
 
-struct RouteSpec {
-    UID_t source;
-    UID_t target;
-};
-typedef struct RouteSpec RouteSpec_t;
+typedef struct {
+    uint64_t address;
+    pthread_t * thread_state;
+    int socket_fd;
+    int state;
+    uint64_t bytes_in;
+    uint64_t bytes_out;
+} client_context_t;
 
-RouteSpec_t routes[MAX_ROUTES];
-UID_t       clients[MAX_CLIENTS];
+GList * client_list = NULL;
+volatile uint64_t cleanup = 0;
+volatile uint64_t nextAddress = 1;
 
 int getListenSocket( struct addrinfo * hints ) {
     int ret;
@@ -77,29 +81,118 @@ int getListenSocket( struct addrinfo * hints ) {
     return sockfd;
 }
 
-void * clientProcess( void * args ) {
-    int remote_fd = (int)(args);
+void * clientProcess( void * _context ) {
+    client_context_t * context = (client_context_t *)_context;
+    context->state = GNW_STATE_OPEN;
 
-    ssize_t readData = 1;
-    while( readData > 0 ) {
-        printf( "Waiting for data...{%d}\n", readData );
-        char buffer[1024] = { 0 };
-        readData = read( remote_fd, buffer, 1024 );
-        if( readData > 0 )
-            write( remote_fd, buffer, readData );
+    char clientAddress[20] = { 0 };
+    gnw_format_address( clientAddress, context->address );
+
+    printf( "%s\tState: OPEN\n", clientAddress );
+
+    // Say hello to the client
+    gnw_emitCommandPacket( context->socket_fd, GNW_ACK, NULL, 0 );
+
+    // Wait for instructions...
+    char buffer[128] = { 0 };
+    while( context->state != GNW_STATE_RUN ) {
+        memset( buffer, 0, 128 );
+        ssize_t length = gnw_wait( context->socket_fd, GNW_COMMAND, buffer, 128 );
+
+        if( length < 1 ) {
+            fprintf( stderr, "%s\tIO error, dropping client.\n", clientAddress );
+            context->state = GNW_STATE_CLOSE;
+            close( context->socket_fd );
+            cleanup++;
+            return NULL;
+        }
+        gnw_header_t * header = (gnw_header_t *)buffer;
+        char * data = buffer+sizeof( gnw_header_t );
+        if( header->type == GNW_COMMAND ) {
+            if( length - sizeof( gnw_header_t ) <= 0 ) {
+                close( context->socket_fd );
+                context->state = GNW_STATE_CLOSE;
+                printf( "%s\tBad state, sent command with no payload? Dropped client.\n", clientAddress );
+                cleanup++;
+                return NULL;
+            }
+
+            if( *data == GNW_CMD_NEW_ADDRESS ) {
+                uint64_t newAddress = nextAddress++;
+                gnw_emitCommandPacket( context->socket_fd, GNW_ACK, (char *)&newAddress, 8 );
+                context->address = newAddress;
+                gnw_format_address( clientAddress, context->address );
+
+                printf( "%s\tState:RUN\n", clientAddress );
+
+                context->state = GNW_STATE_RUN;
+            }
+        }
     }
-    close( remote_fd );
-    printf( "Socket closed.\n" );
+
+    /*const char * tempBuffer = "Contrary to popular belief, Lorem Ipsum is not simply random text. It has roots in a piece of classical Latin literature from 45 BC, making it over 2000 years old. Richard McClintock, a Latin professor at Hampden-Sydney College in Virginia, looked up one of the more obscure Latin words, consectetur, from a Lorem Ipsum passage, and going through the cites of the word in classical literature, discovered the undoubtable source. Lorem Ipsum comes from sections 1.10.32 and 1.10.33 of \"de Finibus Bonorum et Malorum\" (The Extremes of Good and Evil) by Cicero, written in 45 BC. This book is a treatise on the theory of ethics, very popular during the Renaissance. The first line of Lorem Ipsum, \"Lorem ipsum dolor sit amet..\", comes from a line in section 1.10.32.";
+    write( remote_fd, tempBuffer, strlen(tempBuffer) );*/
+
+    if( context->state == GNW_STATE_RUN ) {
+        ssize_t readData = 1;
+        while (readData > 0) {
+            char buffer[1024] = {0};
+            readData = read(context->socket_fd, buffer, 1024);
+
+            gnw_header_t *header = (gnw_header_t *) buffer;
+            printf(
+                    "%s\t>>>\t%dB\t[%s]\t%s\n",
+                    clientAddress,
+                    readData,
+                    (header->type == GNW_DATA ? "DATA" : "?"),
+                    buffer + sizeof(gnw_header_t)
+            );
+
+            context->bytes_in += readData;
+        }
+    }
+
+    close( context->socket_fd );
+    context->state = GNW_STATE_CLOSE;
+    printf( "%s\nState: CLOSE.\n", clientAddress );
+    cleanup++;
+    return NULL;
 }
 
-void dumpStateInfo() {
-    printf( "Clients\n" );
+void * statistics_thread( void * none ) {
+    while( 1 ) {
+
+        printf( "UID\tState\tIn\tOut\n" );
+        GList * iter = client_list;
+        while( iter != NULL ) {
+            client_context_t * context = (client_context_t *)iter->data;
+
+            char state_str[32] = { 0 };
+            switch( context->state ) {
+                case GNW_STATE_OPEN: sprintf( state_str, "OPEN" ); break;
+                case GNW_STATE_SETUP: sprintf( state_str, "SETUP" ); break;
+                case GNW_STATE_RUN: sprintf( state_str, "RUN" ); break;
+                case GNW_STATE_COMMAND: sprintf( state_str, "CMD" ); break;
+                case GNW_STATE_CLOSE: sprintf( state_str, "CLOSE" ); break;
+                default:
+                    sprintf( state_str, "???" );
+            }
+
+            printf( "%llx\t%s\t%lluB\t%lluB\n",
+                    (unsigned long long int) context->address,
+                    state_str,
+                    (unsigned long long int) context->bytes_in,
+                    (unsigned long long int) context->bytes_out );
+
+            iter = iter->next;
+        }
+        printf( "\n" );
+
+        sleep( 10 );
+    }
 }
 
 int main(int argc, char ** argv ) {
-    memset( &routes,  0, MAX_ROUTES * sizeof(RouteSpec_t) );
-    memset( &clients, 0, MAX_CLIENTS * sizeof(UID_t) );
-
     struct addrinfo listen_hints;
     int ret;
 
@@ -115,20 +208,29 @@ int main(int argc, char ** argv ) {
         exit( 1 );
     }
 
+    pthread_t stat_context;
+    pthread_create( &stat_context, NULL, statistics_thread, NULL );
+
     while( 1 ) {
         struct sockaddr_storage remote_socket;
-        socklen_t newSock_len;
+        socklen_t newSock_len = sizeof( socklen_t );
         int remote_fd = accept( listen_fd, (struct sockaddr *)&remote_socket, &newSock_len );
         if( remote_fd == -1 ) {
             perror( "accept" );
             continue;
         }
 
-        pthread_t thread_spec;
-        int result = pthread_create( &thread_spec, NULL, clientProcess, (void *)remote_fd );
-        assert( !result );
+        client_context_t * new_context = (client_context_t *)malloc( sizeof(client_context_t) );
+        memset( new_context, 0, sizeof( client_context_t ) );
+        new_context->thread_state = (pthread_t *)malloc( sizeof(pthread_t) );
+        new_context->socket_fd = remote_fd;
+        new_context->address = 0;
 
-        dumpStateInfo();
+        int result = pthread_create( new_context->thread_state, NULL, clientProcess, new_context );
+        assert( !result );
+        client_list = g_list_prepend( client_list, new_context );
+
+        //printf( "%d active threads...\n", g_list_length( client_list ) );
     }
 
     if( listen_fd != -1 )

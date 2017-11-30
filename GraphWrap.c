@@ -17,6 +17,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include <unistd.h>
 #include <wait.h>
 #include <errno.h>
@@ -27,11 +28,15 @@
 #include <sys/stat.h>
 #include <syslog.h>
 #include <netdb.h>
+#include <poll.h>
 
 #define LOG_NAME "GraphWrap"
 
 #define PIPE_READ(PIPE) PIPE[0]
 #define PIPE_WRITE(PIPE) PIPE[1]
+
+#define PROCESS_OUT 0
+#define SOCKET_IN   1
 
 extern char **environ;
 
@@ -39,6 +44,18 @@ extern char **environ;
 uint16_t     arg_router_port  = 19000;
 unsigned int arg_read_timeout = 5;
 bool         arg_daemonize    = false;
+uint64_t     graph_address    = 0;
+
+// Utility Stuff //
+void assert( bool state, char * warning ) {
+    if( state )
+        return;
+
+    if( arg_daemonize )
+        syslog( LOG_WARNING, "ASSERT FAILURE -> %s\n", warning );
+    else
+        fprintf( stderr, "ASSERT FAILURE -> %s\n", warning );
+}
 
 void fail( const char * err ) {
     if( arg_daemonize )
@@ -77,7 +94,7 @@ void daemonize() {
 
     // Move to a sane working directory
     // root for now...
-    chdir("/");
+    //chdir("/");
 
     // Close all open FDs
     for( long fd = sysconf(_SC_OPEN_MAX); fd>=0; fd-- ) {
@@ -88,6 +105,7 @@ void daemonize() {
     openlog( LOG_NAME, LOG_PID, LOG_DAEMON );
 }
 
+// Process and Network Connections //
 int routerConnect() {
     struct addrinfo hints;
     struct addrinfo *clientinfo;
@@ -130,15 +148,36 @@ int routerConnect() {
     return sockfd;
 }
 
+void findRealPath( char * target, const char * binary ) {
+    char pathBuffer[2048] = { 0 };
+    char * path = getenv( "PATH" );
+    char * parent = strtok( path, ":" );
+
+    while( parent != NULL ) {
+        memset( pathBuffer, 0, 2048 );
+        sprintf( pathBuffer, "%s/%s", parent, binary );
+
+        if( access(pathBuffer, F_OK) != -1 ) {
+            sprintf( target, "%s/%s", parent, binary );
+            return;
+        }
+
+        parent = strtok( NULL, ":" );
+    }
+
+    // Guess we must have an actual path already...
+    sprintf( target, "%s", binary );
+}
+
 int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** argv ) {
     // Capture stdout to wrap_stdout
     dup2( wrap_stdin,  STDIN_FILENO  );
     dup2( wrap_stdout, STDOUT_FILENO );
 
     if( arg_daemonize )
-        syslog( LOG_INFO, "Starting inner process %s\n", cmd );
+        syslog( LOG_INFO, "Process started\n" );
     else
-        fprintf( stderr, "Starting inner process %s\n", cmd );
+        fprintf( stderr, "Process started\n" );
 
     int result = execve( cmd, argv, environ );
 
@@ -151,11 +190,33 @@ int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** ar
     return -1;
 }
 
+int queryMode( int argc, char ** argv, int index ) {
+    // Connect to the local router.
+    int data_fd = routerConnect();
+    if( data_fd < 0 )
+        fail( "Unable to get a connection to the graph router. STOP." );
+
+    do {
+        //argv[index]
+        if( strncasecmp( "list", argv[index], 4 ) == 0 ) {
+            gnw_sendCommand( data_fd, GNW_CMD_ADDRESS_LIST );
+
+            char buffer[2048] = { 0 };
+            ssize_t length = 0;
+            if( (length = gnw_wait( data_fd, GNW_ACK, buffer, 2048 )) > 0 ) {
+                printf( "Got ACK\n" );
+            }
+        }
+
+    } while( ++index < argc );
+
+    return EXIT_SUCCESS;
+}
+
 int main(int argc, char ** argv ) {
     // Argument Parsing //
     char arg;
-    while( (arg = getopt(argc, argv, "p:t:d")) != -1 ) {
-        printf( "Index: %d\n", optind );
+    while( (arg = getopt(argc, argv, "p:t:dq")) != -1 ) {
         switch( arg ) {
             case 'p':
                 arg_router_port = (uint16_t)strtoul( optarg, NULL, 10 );
@@ -167,8 +228,10 @@ int main(int argc, char ** argv ) {
 
             case 'd':
                 arg_daemonize = true;
-                printf( "Becoming a background process..." );
                 break;
+
+            case 'q':
+                return queryMode( argc, argv, optind );
 
             case '?':
                 printf( "Opt: %s, Arg: %s\n", optopt, optarg );
@@ -179,13 +242,56 @@ int main(int argc, char ** argv ) {
         }
     }
     const int inner_binary_index = optind;
-    const char * inner_binary = argv[inner_binary_index];
     const int inner_binary_argc  = argc - optind;
+    char inner_binary[2048] = { 0 };
+
+    // Search using the system path for the 'real' binary
+    findRealPath( inner_binary, argv[inner_binary_index] );
+
+    fprintf( stdout, "Found @ %s\n", inner_binary );
+    fflush( stdout );
+
+    // Connect to the local router.
+    int data_fd = routerConnect();
+    if( data_fd < 0 )
+        fail( "Unable to get a connection to the graph router. STOP." );
+
+    char buffer[128] = { 0 };
+    if( gnw_wait(data_fd, GNW_ACK, buffer, 128) < 0 )
+        fail( "No response from router. STOP." );
+
+    gnw_sendCommand( data_fd, GNW_CMD_NEW_ADDRESS );
+
+    int client_state = GNW_STATE_OPEN;
+    gnw_header_t * header = (gnw_header_t *)buffer;
+    while( client_state != GNW_STATE_RUN ) {
+        memset( buffer, 0, 128 );
+
+        ssize_t length = gnw_wait( data_fd, GNW_ACK, buffer, 128 );
+        if( length < 0) {
+            fprintf(stderr, "Error while waiting for router ACK response. STOP.\n");
+            close( data_fd );
+            exit( EXIT_FAILURE );
+        }
+
+        switch ( client_state ) {
+            case GNW_STATE_OPEN:
+                if( header->type == GNW_ACK && length == sizeof(gnw_header_t) + 8 ) {
+                    graph_address = *(uint64_t *)( buffer + sizeof(gnw_header_t) );
+                    client_state = GNW_STATE_RUN;
+                }
+                break;
+        }
+    }
 
     // Become a background daemon //
     // Probably should become a child of the resident router, but this will work for now... -John.
-    if( arg_daemonize )
+    if( arg_daemonize ) {
+        printf( "%llu\n", graph_address );
         daemonize();
+    } else {
+        printf( "Address = %llu\n", graph_address );
+    }
 
     // Get the pipes together
     int wrap_stdin[2];
@@ -205,59 +311,67 @@ int main(int argc, char ** argv ) {
 
     // Become two processes, launch the child.
     pid_t childPID = fork();
-    if( childPID == 0 )
-        return processRunner( PIPE_READ(wrap_stdin), PIPE_WRITE(wrap_stdout), inner_binary, newArgs );
+    if( childPID == 0 ) {
+        processRunner(PIPE_READ(wrap_stdin), PIPE_WRITE(wrap_stdout), inner_binary, newArgs);
+        printf( "???\n" );
+        return 0;
+    }
 
-    FILE * writePipe = fdopen( PIPE_WRITE(wrap_stdin), "w" );
+    struct pollfd watch_fd[2];
+    memset( watch_fd, 0, sizeof( struct pollfd ) * 2 );
 
-    //ToDo: Remove - add socket connection for input to forward to the child stdin pipe
-    fprintf( writePipe, "As he crossed toward the pharmacy at the corner he involuntarily turned his head because of a burst of light that had ricocheted from his temple, and saw, with that quick smile with which we greet a rainbow or a rose, a blindingly white parallelogram of sky being unloaded from the van—a dresser with mirrors across which, as across a cinema screen, passed a flawlessly clear reflection of boughs sliding and swaying not arboreally, but with a human vacillation, produced by the nature of those who were carrying this sky, these boughs, this gliding façade.\n" );
-    fflush( writePipe );
+    watch_fd[PROCESS_OUT].fd = PIPE_READ(wrap_stdout);
+    watch_fd[PROCESS_OUT].events = POLLIN;
 
-    // Connect to the local router.
-    int router_fd = routerConnect();
-
-    if( router_fd < 0 )
-        fail( "Unable to get a connection to the graph router. STOP." );
-
-    struct timeval timeout;
-
-    fd_set pipe_io;
-    FD_ZERO( &pipe_io );
-    FD_SET( PIPE_READ(wrap_stdout), &pipe_io );
-    FD_SET( router_fd, &pipe_io );
-
-    // ToDo: DON'T USE SELECT - USE POLL INSTEAD (select not deprecated, but way less performant) -John
+    watch_fd[SOCKET_IN].fd = data_fd;
+    watch_fd[SOCKET_IN].events = POLLIN;
 
     int status = 0;
     while( status == 0 ) {
-        timeout.tv_sec = arg_read_timeout;
-        timeout.tv_usec = 0;
-        int rv = select(PIPE_READ(wrap_stdout) + 1, &pipe_io, NULL, NULL, &timeout);
+        int rv = poll( watch_fd, 2, arg_read_timeout * 1000 );
 
-        if( rv == -1 ) {
+        if( rv == -1 ) {        // Error state while poll'ing
             perror( "select" );
             break;
-        } else if( rv == 0 ) {
+        } else if( rv == 0 ) {  // Timed out on poll wait
 
+            // Has the wrapped process exited/died?
             int status = 0;
             int ret = waitpid( childPID, &status, WNOHANG );
             if( ret == -1 && WIFEXITED(status) ) {
-                if( arg_daemonize )
-                    syslog( LOG_INFO, "Process terminated (exit code = %d)\n", WEXITSTATUS(status) );
+                if (arg_daemonize)
+                    syslog(LOG_INFO, "Process terminated (exit code = %d)\n", WEXITSTATUS(status));
                 else
-                    fprintf( stderr, "Process terminated (exit code = %d)\n", WEXITSTATUS(status) );
+                    fprintf(stderr, "Process terminated (exit code = %d)\n", WEXITSTATUS(status));
                 break;
             }
-        } else {
-            if( FD_ISSET(PIPE_READ(wrap_stdout), &pipe_io) ) {
-                char buffer[1024] = { 0 };
-                ssize_t bytesRead = read( PIPE_READ(wrap_stdout), &buffer, 1024 );
+        } else {  // Data ready, somewhere...
 
-                if( arg_daemonize )
-                    syslog( LOG_INFO, "%s", buffer );
-                else
-                    fprintf( stderr, "%s", buffer );
+            // Handle any events on the process output
+            if( watch_fd[PROCESS_OUT].revents != 0 ) {
+                if (watch_fd[PROCESS_OUT].revents & POLLIN == POLLIN) {
+                    char buffer[1024] = {0};
+
+                    ssize_t bytesRead = read(watch_fd[PROCESS_OUT].fd, &buffer, 1024);
+                    gnw_emitDataPacket( data_fd, buffer, bytesRead );
+                    //ssize_t bytesWritten = write( data_fd, &buffer, bytesRead );
+                }
+                watch_fd[PROCESS_OUT].revents = 0; // Manual reset, not strictly required, but just in case...
+            }
+
+            // Handle any events on the input stream from the router
+            if( watch_fd[SOCKET_IN].revents != 0 ) {
+                if( watch_fd[SOCKET_IN].revents & POLLIN == POLLIN ) {
+                    char buffer[1024] = {0};
+
+                    ssize_t bytesRead = read(watch_fd[SOCKET_IN].fd, &buffer, 1024);
+                    ssize_t bytesWritten = write( PIPE_WRITE(wrap_stdin), &buffer, bytesRead );
+                    assert( bytesRead == bytesWritten, "Could not push all data to the wrapped process!" );
+
+                    if( bytesRead == 0 ) {
+                        fail( "Router connection hung up! Crash?" );
+                    }
+                }
             }
         }
     }

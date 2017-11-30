@@ -15,7 +15,31 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <stdbool.h>
+
 #pragma ONCE;
+
+#define GNW_VERSION  1
+
+#define GNW_INVALID  0
+#define GNW_DATA     1
+#define GNW_ACK      2
+#define GNW_NACK     3
+#define GNW_COMMAND  100
+
+// Used for wait commands that can accept any packet type
+#define GNW_ANY      0
+
+// Client states
+#define GNW_STATE_OPEN    0x00
+#define GNW_STATE_SETUP   0x01
+#define GNW_STATE_RUN     0x02
+#define GNW_STATE_COMMAND 0x03
+#define GNW_STATE_CLOSE   0xFF
+
+// Valid commands
+#define GNW_CMD_NEW_ADDRESS  1
+#define GNW_CMD_ADDRESS_LIST 2
 
 #define ROUTER_BACKLOG 10
 #define ROUTER_PORT    (const char *)("19000")
@@ -27,3 +51,30 @@
 #define UID_INVALID 0
 
 typedef uint32_t UID_t;
+
+struct gnw_stats {
+    uint64_t bytesWritten;
+    uint64_t bytesRead;
+    uint64_t dataPackets;
+    uint64_t commandPackets;
+};
+typedef struct gnw_stats gnw_stats_t;
+
+struct gnw_header {
+    unsigned int version  : 4;
+    unsigned int flags    : 4;
+    unsigned int type     : 8;
+    unsigned int reserved : 16;   // Probably will become a sequence number, but reserved for now
+} __attribute__((packed, aligned(8)));
+typedef struct gnw_header gnw_header_t;
+
+
+void gnw_format_address( char * buffer, uint64_t address );
+
+void gnw_emitPacket( int fd, char * buffer, ssize_t length );
+void gnw_emitDataPacket( int fd, char * buffer, ssize_t length );
+void gnw_emitCommandPacket( int fd, uint8_t type, char * buffer, ssize_t length );
+
+void gnw_sendCommand( int fd, uint8_t command );
+
+ssize_t gnw_wait( int fd, uint8_t type, char * buffer, ssize_t maxLen );
