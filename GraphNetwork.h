@@ -41,35 +41,41 @@
 #define GNW_CMD_NEW_ADDRESS  1
 #define GNW_CMD_ADDRESS_LIST 2
 
+// Link Constants
+#define GNW_BROADCAST  0
+#define GNW_ANYCAST    1
+#define GNW_ROUNDROBIN 2
+
+#define GNW_MAX_LINKS  10
+
+// Router configuration
 #define ROUTER_BACKLOG 10
 #define ROUTER_PORT    (const char *)("19000")
 #define CONTROL_PORT   (const char *)("19001")
 
-#define MAX_CLIENTS 1024
-#define MAX_ROUTES  1024
-
+// The router itself is uid == 0, so no process can ever be this UID.
 #define UID_INVALID 0
 
 typedef uint32_t UID_t;
 
-struct gnw_stats {
+typedef struct {
     uint64_t bytesWritten;
     uint64_t bytesRead;
     uint64_t dataPackets;
     uint64_t commandPackets;
-};
-typedef struct gnw_stats gnw_stats_t;
+} gnw_stats_t;
 
-struct gnw_header {
+typedef struct {
     unsigned int version  : 4;
     unsigned int flags    : 4;
     unsigned int type     : 8;
     unsigned int reserved : 16;   // Probably will become a sequence number, but reserved for now
-} __attribute__((packed, aligned(8)));
-typedef struct gnw_header gnw_header_t;
+} __attribute__((packed, aligned(8))) gnw_header_t;
 
 
 void gnw_format_address( char * buffer, uint64_t address );
+
+void gnw_dumpPacket( FILE * fd, char * buffer, ssize_t length );
 
 void gnw_emitPacket( int fd, char * buffer, ssize_t length );
 void gnw_emitDataPacket( int fd, char * buffer, ssize_t length );

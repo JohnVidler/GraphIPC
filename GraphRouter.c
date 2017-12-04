@@ -27,16 +27,22 @@
 #include "GraphNetwork.h"
 #include <glib-2.0/glib.h>
 
-typedef struct {
+typedef struct client_context {
     uint64_t address;
     pthread_t * thread_state;
     int socket_fd;
     int state;
     uint64_t bytes_in;
     uint64_t bytes_out;
+
+    int link_policy;
+    struct client_context * links[GNW_MAX_LINKS];
+    int roundrobin_index;
 } client_context_t;
 
 GList * client_list = NULL;
+pthread_mutex_t client_list_mutex;
+
 volatile uint64_t cleanup = 0;
 volatile uint64_t nextAddress = 1;
 
@@ -118,9 +124,7 @@ void * clientProcess( void * _context ) {
             }
 
             if( *data == GNW_CMD_NEW_ADDRESS ) {
-                uint64_t newAddress = nextAddress++;
-                gnw_emitCommandPacket( context->socket_fd, GNW_ACK, (char *)&newAddress, 8 );
-                context->address = newAddress;
+                gnw_emitCommandPacket( context->socket_fd, GNW_ACK, (char *)&(context->address), 8 );
                 gnw_format_address( clientAddress, context->address );
 
                 printf( "%s\tState:RUN\n", clientAddress );
@@ -139,7 +143,7 @@ void * clientProcess( void * _context ) {
             char buffer[1024] = {0};
             readData = read(context->socket_fd, buffer, 1024);
 
-            gnw_header_t *header = (gnw_header_t *) buffer;
+            /*gnw_header_t *header = (gnw_header_t *) buffer;
             printf(
                     "%s\t>>>\t%dB\t[%s]\t%s\n",
                     clientAddress,
@@ -147,8 +151,25 @@ void * clientProcess( void * _context ) {
                     (header->type == GNW_DATA ? "DATA" : "?"),
                     buffer + sizeof(gnw_header_t)
             );
+            context->bytes_in += readData;*/
 
-            context->bytes_in += readData;
+            gnw_dumpPacket( stdout, buffer, readData );
+            printf( "\n" );
+
+            // Apply the forwarding policy
+            switch( context->link_policy ) {
+                case GNW_BROADCAST:
+                    for( int i=0; i<GNW_MAX_LINKS; i++ ) {
+                        if( context->links[i] != NULL ) {
+                            ssize_t bytesWritten = write( context->links[i]->socket_fd, buffer, (size_t)readData );
+                            context->bytes_out += bytesWritten;
+                        }
+                    }
+                    break;
+
+                default:
+                    fprintf( stderr, "Unsupported or bad link policy! Skipped.\n" );
+            }
         }
     }
 
@@ -162,7 +183,8 @@ void * clientProcess( void * _context ) {
 void * statistics_thread( void * none ) {
     while( 1 ) {
 
-        printf( "UID\tState\tIn\tOut\n" );
+        printf( "UID\tState\tIn\tOut\tPolicy\t\tLinks\n" );
+        pthread_mutex_lock( &client_list_mutex );
         GList * iter = client_list;
         while( iter != NULL ) {
             client_context_t * context = (client_context_t *)iter->data;
@@ -178,14 +200,31 @@ void * statistics_thread( void * none ) {
                     sprintf( state_str, "???" );
             }
 
-            printf( "%llx\t%s\t%lluB\t%lluB\n",
+            char policy_str[32] = { 0 };
+            switch( context->link_policy ) {
+                case GNW_BROADCAST: sprintf( policy_str, "BROADCAST" ); break;
+                case GNW_ANYCAST: sprintf( policy_str, "ANYCAST" ); break;
+                case GNW_ROUNDROBIN: sprintf( policy_str, "ROUNDROBIN" ); break;
+                default:
+                    sprintf( policy_str, "???" );
+            }
+
+            printf( "%llx\t%s\t%lluB\t%lluB\t%s\t{ ",
                     (unsigned long long int) context->address,
                     state_str,
                     (unsigned long long int) context->bytes_in,
-                    (unsigned long long int) context->bytes_out );
+                    (unsigned long long int) context->bytes_out,
+                    policy_str );
+
+            for( int i=0; i<GNW_MAX_LINKS; i++ ) {
+                if (context->links[i] != NULL)
+                    printf("%llu ", context->links[i]->address);
+            }
+            printf( "}\n" );
 
             iter = iter->next;
         }
+        pthread_mutex_unlock( &client_list_mutex );
         printf( "\n" );
 
         sleep( 10 );
@@ -208,8 +247,12 @@ int main(int argc, char ** argv ) {
         exit( 1 );
     }
 
+    pthread_mutex_init( &client_list_mutex, NULL );
+
     pthread_t stat_context;
     pthread_create( &stat_context, NULL, statistics_thread, NULL );
+
+    client_context_t * old_context = NULL;
 
     while( 1 ) {
         struct sockaddr_storage remote_socket;
@@ -224,11 +267,22 @@ int main(int argc, char ** argv ) {
         memset( new_context, 0, sizeof( client_context_t ) );
         new_context->thread_state = (pthread_t *)malloc( sizeof(pthread_t) );
         new_context->socket_fd = remote_fd;
-        new_context->address = 0;
+        new_context->address = nextAddress++;
+        new_context->link_policy = GNW_BROADCAST; // Default to broadcast
+
+        for( int i=0; i<GNW_MAX_LINKS; i++ )
+            new_context->links[i] = NULL;
+
+        if( old_context != NULL )
+            new_context->links[0] = old_context;
 
         int result = pthread_create( new_context->thread_state, NULL, clientProcess, new_context );
         assert( !result );
+        pthread_mutex_lock( &client_list_mutex );
         client_list = g_list_prepend( client_list, new_context );
+        pthread_mutex_unlock( &client_list_mutex );
+
+        old_context = new_context;
 
         //printf( "%d active threads...\n", g_list_length( client_list ) );
     }

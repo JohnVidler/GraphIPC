@@ -46,6 +46,9 @@ unsigned int arg_read_timeout = 5;
 bool         arg_daemonize    = false;
 uint64_t     graph_address    = 0;
 
+bool mode_input = false;
+bool mode_output = false;
+
 // Utility Stuff //
 void assert( bool state, char * warning ) {
     if( state )
@@ -150,15 +153,17 @@ int routerConnect() {
 
 void findRealPath( char * target, const char * binary ) {
     char pathBuffer[2048] = { 0 };
-    char * path = getenv( "PATH" );
-    char * parent = strtok( path, ":" );
+    char * path = (char *)malloc( 2048 );
+    memcpy( path, getenv( "PATH" ), strlen(getenv( "PATH" )) );
 
+    char * parent = strtok( path, ":" );
     while( parent != NULL ) {
         memset( pathBuffer, 0, 2048 );
         sprintf( pathBuffer, "%s/%s", parent, binary );
 
         if( access(pathBuffer, F_OK) != -1 ) {
             sprintf( target, "%s/%s", parent, binary );
+            free( path );
             return;
         }
 
@@ -167,6 +172,7 @@ void findRealPath( char * target, const char * binary ) {
 
     // Guess we must have an actual path already...
     sprintf( target, "%s", binary );
+    free( path );
 }
 
 int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** argv ) {
@@ -216,7 +222,7 @@ int queryMode( int argc, char ** argv, int index ) {
 int main(int argc, char ** argv ) {
     // Argument Parsing //
     char arg;
-    while( (arg = getopt(argc, argv, "p:t:dq")) != -1 ) {
+    while( (arg = getopt(argc, argv, "p:t:dqio")) != -1 ) {
         switch( arg ) {
             case 'p':
                 arg_router_port = (uint16_t)strtoul( optarg, NULL, 10 );
@@ -230,6 +236,20 @@ int main(int argc, char ** argv ) {
                 arg_daemonize = true;
                 break;
 
+            case 'i': // Pipe input mode
+                printf( "Input mode\n" );
+                if( mode_output )
+                    fail( "Cannot be both an input *and* an output node! STOP." );
+                mode_input = true;
+                break;
+
+            case 'o': // Pipe output mode
+                printf( "Output mode\n" );
+                if( mode_input )
+                    fail( "Cannot be both an input *and* an output node! STOP." );
+                mode_output = true;
+                break;
+
             case 'q':
                 return queryMode( argc, argv, optind );
 
@@ -241,15 +261,6 @@ int main(int argc, char ** argv ) {
                 break;
         }
     }
-    const int inner_binary_index = optind;
-    const int inner_binary_argc  = argc - optind;
-    char inner_binary[2048] = { 0 };
-
-    // Search using the system path for the 'real' binary
-    findRealPath( inner_binary, argv[inner_binary_index] );
-
-    fprintf( stdout, "Found @ %s\n", inner_binary );
-    fflush( stdout );
 
     // Connect to the local router.
     int data_fd = routerConnect();
@@ -303,6 +314,77 @@ int main(int argc, char ** argv ) {
     if( pipe( wrap_stdout ) == -1 )
         fail( "Could not create wrapper for stdout" );
 
+    // Are we in input mode?
+    if( mode_input ) {
+        struct pollfd watch_fd[1];
+        memset( watch_fd, 0, sizeof( struct pollfd ) );
+
+        watch_fd[0].fd = STDIN_FILENO;
+        watch_fd[0].events = POLLIN;
+
+        char buffer[1024] = { 0 };
+
+        int rv = 0;
+        while( (rv = poll(watch_fd, 1, 0)) != -1 ) {
+            if( rv > 0 ) {
+                memset( buffer, 0, 1024 );
+                ssize_t readBytes = read( watch_fd[0].fd, buffer, 1024 );
+
+                if( readBytes == 0 ) {
+                    fprintf( stderr, "Input shut down, stopping." );
+                    break;
+                }
+
+                gnw_emitDataPacket( data_fd, buffer, readBytes );
+            }
+        }
+
+        // Done, close the FD
+        close( data_fd );
+        return EXIT_SUCCESS;
+    }
+
+    // Are we in output mode?
+    if( mode_output ) {
+        struct pollfd watch_fd[1];
+        memset( watch_fd, 0, sizeof( struct pollfd ) );
+
+        watch_fd[0].fd = data_fd;
+        watch_fd[0].events = POLLIN;
+
+        char buffer[1024] = { 0 };
+
+        int rv = 0;
+        while( (rv = poll(watch_fd, 1, 0)) != -1 ) {
+            if( rv > 0 ) {
+                memset( buffer, 0, 1024 );
+                ssize_t readBytes = read( watch_fd[0].fd, buffer, 1024 );
+
+                if( readBytes == 0 ) {
+                    fprintf( stderr, "NULL read, lost connection to router?\n" );
+                    break;
+                }
+                ssize_t writeBytes = write( STDOUT_FILENO, buffer + sizeof(gnw_header_t), readBytes - sizeof(gnw_header_t) );
+
+                assert( readBytes - sizeof(gnw_header_t) == writeBytes, "Could not push all received bytes to the terminal. Data has been lost." );
+            }
+        }
+
+        // Done, close the FD
+        close( data_fd );
+        return EXIT_SUCCESS;
+    }
+
+    const int inner_binary_index = optind;
+    const int inner_binary_argc  = argc - optind;
+    char inner_binary[2048] = { 0 };
+
+    // Search using the system path for the 'real' binary
+    findRealPath( inner_binary, argv[inner_binary_index] );
+
+    fprintf( stdout, "Found @ %s\n", inner_binary );
+    fflush( stdout );
+
     char * newArgs[inner_binary_argc];
     for( int i=0; i<inner_binary_argc; i++ ) {
         newArgs[i] = argv[inner_binary_index + i];
@@ -313,8 +395,7 @@ int main(int argc, char ** argv ) {
     pid_t childPID = fork();
     if( childPID == 0 ) {
         processRunner(PIPE_READ(wrap_stdin), PIPE_WRITE(wrap_stdout), inner_binary, newArgs);
-        printf( "???\n" );
-        return 0;
+        return EXIT_FAILURE; // Should never happen...
     }
 
     struct pollfd watch_fd[2];
@@ -354,7 +435,6 @@ int main(int argc, char ** argv ) {
 
                     ssize_t bytesRead = read(watch_fd[PROCESS_OUT].fd, &buffer, 1024);
                     gnw_emitDataPacket( data_fd, buffer, bytesRead );
-                    //ssize_t bytesWritten = write( data_fd, &buffer, bytesRead );
                 }
                 watch_fd[PROCESS_OUT].revents = 0; // Manual reset, not strictly required, but just in case...
             }
@@ -364,9 +444,17 @@ int main(int argc, char ** argv ) {
                 if( watch_fd[SOCKET_IN].revents & POLLIN == POLLIN ) {
                     char buffer[1024] = {0};
 
-                    ssize_t bytesRead = read(watch_fd[SOCKET_IN].fd, &buffer, 1024);
-                    ssize_t bytesWritten = write( PIPE_WRITE(wrap_stdin), &buffer, bytesRead );
-                    assert( bytesRead == bytesWritten, "Could not push all data to the wrapped process!" );
+                    ssize_t bytesRead = read(watch_fd[SOCKET_IN].fd, buffer, 1024);
+
+                    gnw_dumpPacket( stdout, buffer, bytesRead );
+
+                    gnw_header_t * header = (gnw_header_t *)buffer;
+                    ssize_t length = bytesRead - sizeof( gnw_header_t );
+                    char * payload = buffer + sizeof( gnw_header_t );
+                    assert( header->type == GNW_DATA, "Non-Data packet?" );
+
+                    ssize_t bytesWritten = write( PIPE_WRITE(wrap_stdin), payload, length );
+                    assert( length == bytesWritten, "Could not push all data to the wrapped process!" );
 
                     if( bytesRead == 0 ) {
                         fail( "Router connection hung up! Crash?" );
@@ -388,5 +476,5 @@ int main(int argc, char ** argv ) {
     if( arg_daemonize )
         closelog();
 
-    return 0;
+    return EXIT_SUCCESS;
 }

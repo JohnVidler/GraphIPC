@@ -36,6 +36,32 @@ void gnw_format_address( char * buffer, uint64_t address ) {
     }
 }
 
+void gnw_dumpPacket( FILE * fd, char * buffer, ssize_t length ) {
+    gnw_header_t * header = (gnw_header_t *)buffer;
+    char * payload = buffer + sizeof( gnw_header_t );
+    ssize_t payload_length = length - sizeof( gnw_header_t );
+
+    fprintf( fd, "Version:\t%x\n", header->version );
+    fprintf( fd, "Type:\t%x\t(" );
+    switch( header->type ) {
+        case GNW_COMMAND: fprintf( fd, "COMMAND" ); break;
+        case GNW_DATA:    fprintf( fd, "DATA" );    break;
+        case GNW_ACK:     fprintf( fd, "ACK" );     break;
+        case GNW_NACK:    fprintf( fd, "NACK" );    break;
+        case GNW_INVALID: fprintf( fd, "INVALID" ); break;
+        default:
+            fprintf( fd, "???" );
+    }
+    fprintf( fd, ")\n" );
+    fprintf( fd, "Flags:\t%x\n", header->flags );
+
+    for( int i=0; i<payload_length; i++ ) {
+        fprintf( fd, "%02x ", payload[i] );
+        if( i % 8 == 0 )
+            fprintf( fd, "\n" );
+    }
+}
+
 void gnw_emitPacket( int fd, char * buffer, ssize_t length ) {
     ssize_t written = write( fd, buffer, length );
     link_stats.bytesWritten += written;
@@ -75,7 +101,7 @@ void gnw_emitCommandPacket( int fd, uint8_t type, char * buffer, ssize_t length 
 
 void gnw_sendCommand( int fd, uint8_t command ) {
     char buffer[1] = { command };
-    gnw_emitCommandPacket( fd, GNW_COMMAND, &buffer, 1 );
+    gnw_emitCommandPacket( fd, GNW_COMMAND, buffer, 1 );
 }
 
 ssize_t gnw_wait( int fd, uint8_t type, char * buffer, ssize_t maxLen ) {
