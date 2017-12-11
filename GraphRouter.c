@@ -26,6 +26,11 @@
 #include <assert.h>
 #include "GraphNetwork.h"
 #include <glib-2.0/glib.h>
+#include <getopt.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+#define COMMAND_PIPE_PATH "/tmp/GraphRouter.pipe"
 
 typedef struct client_context {
     uint64_t address;
@@ -87,6 +92,88 @@ int getListenSocket( struct addrinfo * hints ) {
     return sockfd;
 }
 
+const char * const fmt_sizeStr[6] = { "B", "KB", "MB", "GB", "TB", "PB" };
+unsigned long long fmt_humanSize( unsigned long long size, char * unitRef ) {
+    unsigned long long mul = 0;
+    while( size > 1024 ) {
+        size = size / 1024;
+        printf( "Size: %llu %s\n", size, fmt_sizeStr[mul] );
+        mul++;
+    }
+    return size;
+}
+
+void emitStatistics( FILE * stream ) {
+    fprintf( stream, "UID\tState\tIn\tOut\tPolicy\t\tLinks\n" );
+    pthread_mutex_lock( &client_list_mutex );
+    GList * iter = client_list;
+    while( iter != NULL ) {
+        client_context_t * context = (client_context_t *)iter->data;
+
+        // Just hide zombie processes for now - this should be cleaned up properly at some point...
+        if( context->state != GNW_STATE_ZOMBIE ) {
+            char state_str[32] = {0};
+            switch (context->state) {
+                case GNW_STATE_OPEN:
+                    sprintf(state_str, "OPEN");
+                    break;
+                case GNW_STATE_SETUP:
+                    sprintf(state_str, "SETUP");
+                    break;
+                case GNW_STATE_RUN:
+                    sprintf(state_str, "RUN");
+                    break;
+                case GNW_STATE_COMMAND:
+                    sprintf(state_str, "CMD");
+                    break;
+                case GNW_STATE_CLOSE:
+                    sprintf(state_str, "CLOSE");
+                    break;
+                default:
+                    sprintf(state_str, "???");
+            }
+
+            char policy_str[32] = {0};
+            switch (context->link_policy) {
+                case GNW_BROADCAST:
+                    sprintf(policy_str, "BROADCAST");
+                    break;
+                case GNW_ANYCAST:
+                    sprintf(policy_str, "ANYCAST");
+                    break;
+                case GNW_ROUNDROBIN:
+                    sprintf(policy_str, "ROUNDROBIN");
+                    break;
+                default:
+                    sprintf(policy_str, "???");
+            }
+
+            char * ref = NULL;
+            fmt_humanSize( context->bytes_out, ref );
+
+            fprintf( stream, "%llx\t%s\t%lluB\t%lluB\t%s\t{ ",
+                     (unsigned long long int) context->address,
+                     state_str,
+                     (unsigned long long int) context->bytes_in,
+                     (unsigned long long int) context->bytes_out,
+                     policy_str);
+
+            for (int i = 0; i < GNW_MAX_LINKS; i++) {
+                if (context->links[i] != NULL)
+                    fprintf( stream, "%llu ", context->links[i]->address );
+            }
+            fprintf( stream, "}\n" );
+
+            if (context->state == GNW_STATE_CLOSE)
+                context->state = GNW_STATE_ZOMBIE;
+        }
+
+        iter = iter->next;
+    }
+    pthread_mutex_unlock( &client_list_mutex );
+    fprintf( stream, "\n" );
+}
+
 void * clientProcess( void * _context ) {
     client_context_t * context = (client_context_t *)_context;
     context->state = GNW_STATE_OPEN;
@@ -115,6 +202,8 @@ void * clientProcess( void * _context ) {
         gnw_header_t * header = (gnw_header_t *)buffer;
         char * data = buffer+sizeof( gnw_header_t );
         if( header->type == GNW_COMMAND ) {
+            printf( "Command packet\n" );
+
             if( length - sizeof( gnw_header_t ) <= 0 ) {
                 close( context->socket_fd );
                 context->state = GNW_STATE_CLOSE;
@@ -123,13 +212,18 @@ void * clientProcess( void * _context ) {
                 return NULL;
             }
 
-            if( *data == GNW_CMD_NEW_ADDRESS ) {
-                gnw_emitCommandPacket( context->socket_fd, GNW_ACK, (char *)&(context->address), 8 );
-                gnw_format_address( clientAddress, context->address );
+            switch( *data ) {
+                case GNW_CMD_NEW_ADDRESS:
+                    gnw_emitCommandPacket( context->socket_fd, GNW_ACK, (char *)&(context->address), 8 );
+                    gnw_format_address( clientAddress, context->address );
 
-                printf( "%s\tState:RUN\n", clientAddress );
+                    printf( "%s\tState:RUN\n", clientAddress );
 
-                context->state = GNW_STATE_RUN;
+                    context->state = GNW_STATE_RUN;
+                    break;
+
+                default:
+                    fprintf( stderr, "Unknown command type [%d], ignored.\n", *data );
             }
         }
     }
@@ -138,33 +232,32 @@ void * clientProcess( void * _context ) {
     write( remote_fd, tempBuffer, strlen(tempBuffer) );*/
 
     if( context->state == GNW_STATE_RUN ) {
-        ssize_t readData = 1;
-        while (readData > 0) {
+        ssize_t bytesRead = 1;
+        while (bytesRead > 0) {
             char buffer[1024] = {0};
-            readData = read(context->socket_fd, buffer, 1024);
+            bytesRead = read(context->socket_fd, buffer, 1024);
+            context->bytes_in += bytesRead;
 
-            /*gnw_header_t *header = (gnw_header_t *) buffer;
-            printf(
-                    "%s\t>>>\t%dB\t[%s]\t%s\n",
-                    clientAddress,
-                    readData,
-                    (header->type == GNW_DATA ? "DATA" : "?"),
-                    buffer + sizeof(gnw_header_t)
-            );
-            context->bytes_in += readData;*/
-
-            gnw_dumpPacket( stdout, buffer, readData );
-            printf( "\n" );
+            //gnw_dumpPacket( stdout, buffer, bytesRead );
+            //printf( "\n" );
 
             // Apply the forwarding policy
             switch( context->link_policy ) {
                 case GNW_BROADCAST:
                     for( int i=0; i<GNW_MAX_LINKS; i++ ) {
                         if( context->links[i] != NULL ) {
-                            ssize_t bytesWritten = write( context->links[i]->socket_fd, buffer, (size_t)readData );
-                            context->bytes_out += bytesWritten;
+                            ssize_t bytesWritten = write( context->links[i]->socket_fd, buffer, (size_t)bytesRead );
+                            context->links[i]->bytes_out += bytesWritten;
                         }
                     }
+                    break;
+
+                case GNW_ANYCAST:
+                    fprintf( stderr, "Anycast policy not currently supported! Skipped.\n" );
+                    break;
+
+                case GNW_ROUNDROBIN:
+                    fprintf( stderr, "Round-Robin policy not currently supported! Skipped.\n" );
                     break;
 
                 default:
@@ -180,58 +273,55 @@ void * clientProcess( void * _context ) {
     return NULL;
 }
 
-void * statistics_thread( void * none ) {
+void * commandProcess( void * none ) {
+    // Set up the command pipe
+    int cmd_fd;
+    mkfifo( COMMAND_PIPE_PATH, 0666 );
+    cmd_fd = open( COMMAND_PIPE_PATH, O_RDWR | O_CREAT ); // ToDo: Close the command pipe when the router is shut down!
+    FILE * cmd_file = fdopen( cmd_fd, "w+" );
+
+    printf( "Waiting for commands...\n" );
+    char buffer[1024] = { 0 };
     while( 1 ) {
+        memset( buffer, 0, 1024 );
+        ssize_t bytesRead = read( cmd_fd, buffer, 1024 );
 
-        printf( "UID\tState\tIn\tOut\tPolicy\t\tLinks\n" );
-        pthread_mutex_lock( &client_list_mutex );
-        GList * iter = client_list;
-        while( iter != NULL ) {
-            client_context_t * context = (client_context_t *)iter->data;
+        if( bytesRead == -1 )
+            break;
 
-            char state_str[32] = { 0 };
-            switch( context->state ) {
-                case GNW_STATE_OPEN: sprintf( state_str, "OPEN" ); break;
-                case GNW_STATE_SETUP: sprintf( state_str, "SETUP" ); break;
-                case GNW_STATE_RUN: sprintf( state_str, "RUN" ); break;
-                case GNW_STATE_COMMAND: sprintf( state_str, "CMD" ); break;
-                case GNW_STATE_CLOSE: sprintf( state_str, "CLOSE" ); break;
-                default:
-                    sprintf( state_str, "???" );
+        if( strncmp( buffer, "status", 6 ) == 0 ) {
+            printf( "Status request\n" );
+
+            for( int i=0; i<100; i++ ) {
+                fprintf(cmd_file, "???\n");
+                fflush(cmd_file);
             }
 
-            char policy_str[32] = { 0 };
-            switch( context->link_policy ) {
-                case GNW_BROADCAST: sprintf( policy_str, "BROADCAST" ); break;
-                case GNW_ANYCAST: sprintf( policy_str, "ANYCAST" ); break;
-                case GNW_ROUNDROBIN: sprintf( policy_str, "ROUNDROBIN" ); break;
-                default:
-                    sprintf( policy_str, "???" );
-            }
-
-            printf( "%llx\t%s\t%lluB\t%lluB\t%s\t{ ",
-                    (unsigned long long int) context->address,
-                    state_str,
-                    (unsigned long long int) context->bytes_in,
-                    (unsigned long long int) context->bytes_out,
-                    policy_str );
-
-            for( int i=0; i<GNW_MAX_LINKS; i++ ) {
-                if (context->links[i] != NULL)
-                    printf("%llu ", context->links[i]->address);
-            }
-            printf( "}\n" );
-
-            iter = iter->next;
+            emitStatistics( cmd_file );
+            fflush( cmd_file );
+        } else {
+            fprintf( cmd_file, "No such command. Did nothing.\n" );
         }
-        pthread_mutex_unlock( &client_list_mutex );
-        printf( "\n" );
+
+    }
+
+    printf( "Command process shut down, bye!\n" );
+    unlink( COMMAND_PIPE_PATH );
+
+    return NULL;
+}
+
+void * statisticsProcess(void *none) {
+    while (1) {
+        emitStatistics( stdout );
 
         sleep( 10 );
     }
 }
 
-int main(int argc, char ** argv ) {
+int router_process() {
+
+    // Set up the socket server
     struct addrinfo listen_hints;
     int ret;
 
@@ -250,7 +340,10 @@ int main(int argc, char ** argv ) {
     pthread_mutex_init( &client_list_mutex, NULL );
 
     pthread_t stat_context;
-    pthread_create( &stat_context, NULL, statistics_thread, NULL );
+    pthread_create( &stat_context, NULL, statisticsProcess, NULL );
+
+    pthread_t command_context;
+    pthread_create( &command_context, NULL, commandProcess, NULL );
 
     client_context_t * old_context = NULL;
 
@@ -291,4 +384,68 @@ int main(int argc, char ** argv ) {
         close( listen_fd );
 
     return EXIT_SUCCESS;
+}
+
+#define ARG_STATUS     0
+#define ARG_POLICY     1
+#define ARG_CONNECT    2
+#define ARG_DISCONNECT 3
+
+int main(int argc, char ** argv ) {
+
+    struct option longOptions[2] = { 0 };
+    longOptions[ARG_STATUS].name    = "status";
+    longOptions[ARG_STATUS].has_arg = no_argument;
+    longOptions[ARG_STATUS].flag    = NULL;
+
+    // Argument Parsing //
+    int arg;
+    int indexPtr = 0;
+    while( (arg = getopt_long( argc, argv, "", longOptions, &indexPtr )) != -1 ) {
+        switch( arg ) {
+            case ARG_STATUS: {
+                int cmd_fd = open( COMMAND_PIPE_PATH, O_RDWR );
+                FILE * cmd_file = fdopen( cmd_fd, "w+" );
+
+                printf( ">>>\n" );
+                fprintf( cmd_file, "status\n" );
+                fflush( cmd_file );
+
+                printf( "<<<\n" );
+                char buffer[1024] = { 0 };
+                while( 1 ) {
+                    memset( buffer, 0, 1024 );
+                    ssize_t bytesRead = read( cmd_fd, buffer, 1024 );
+
+                    if( bytesRead == -1 )
+                        break;
+
+                    if( buffer+bytesRead-4 > 0 && strncmp( buffer+bytesRead-4, "EOF\n", 4 ) == 0 )
+                        break;
+
+                    fprintf( cmd_file, "%s\n", buffer );
+                    fflush( cmd_file );
+
+                }
+
+                close( cmd_fd );
+                return EXIT_SUCCESS;
+            }
+
+            case ARG_POLICY:
+                return EXIT_FAILURE;
+
+            case ARG_CONNECT:
+                return EXIT_FAILURE;
+
+            case ARG_DISCONNECT:
+                return EXIT_FAILURE;
+
+            default:
+                fprintf( stderr, "Bad command combination. STOP." );
+                return EXIT_FAILURE;
+        }
+    }
+
+    return router_process();
 }

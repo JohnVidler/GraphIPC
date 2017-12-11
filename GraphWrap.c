@@ -49,6 +49,36 @@ uint64_t     graph_address    = 0;
 bool mode_input = false;
 bool mode_output = false;
 
+pid_t childPID = -1;
+
+void external_shutdown() {
+    fprintf( stderr, "A shutdown event occurred\n" );
+    // Shut down the child, if the parent is closing.
+    if( childPID != -1 ) {
+        fprintf(stderr, "Shutting down process %d\n", childPID);
+
+        printf( "KILL\n" );
+
+        // Forward the signal to the child
+        kill(childPID, SIGKILL);
+
+        sleep( 1 );
+
+        // Wait for the child to shut down
+        waitpid(childPID, NULL, 0);
+
+        fprintf( stderr, "Child process exited\n" );
+
+        // Reset the child PID so we don't wait forever for an already dead process
+        childPID = -1;
+    }
+}
+
+void sigint_handler( int signum ) {
+    external_shutdown();
+    exit( EXIT_SUCCESS );
+}
+
 // Utility Stuff //
 void assert( bool state, char * warning ) {
     if( state )
@@ -65,6 +95,8 @@ void fail( const char * err ) {
         syslog( LOG_ERR, "%s\n", err );
     else
         fprintf( stderr, "%s\n", err );
+
+    external_shutdown();
     exit(EXIT_FAILURE);
 }
 
@@ -119,17 +151,14 @@ int routerConnect() {
     hints.ai_socktype = SOCK_STREAM;
 
     // Hard coded loopback, for now... -John
-    if ((retval = getaddrinfo("127.0.0.1", ROUTER_PORT, &hints, &clientinfo)) != 0) {
-        //fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(retval));
+    if ((retval = getaddrinfo("127.0.0.1", ROUTER_PORT, &hints, &clientinfo)) != 0)
         fail( "Unable to get a valid local socket to use... no more FDs available?" );
-    }
 
     // loop through all the results and connect to the first we can
     int sockfd = -1;
     struct addrinfo *p;
     for(p = clientinfo; p != NULL; p = p->ai_next) {
-        if ((sockfd = socket(p->ai_family, p->ai_socktype,
-                             p->ai_protocol)) == -1) {
+        if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
             perror("client: socket");
             continue;
         }
@@ -196,33 +225,20 @@ int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** ar
     return -1;
 }
 
-int queryMode( int argc, char ** argv, int index ) {
-    // Connect to the local router.
-    int data_fd = routerConnect();
-    if( data_fd < 0 )
-        fail( "Unable to get a connection to the graph router. STOP." );
-
-    do {
-        //argv[index]
-        if( strncasecmp( "list", argv[index], 4 ) == 0 ) {
-            gnw_sendCommand( data_fd, GNW_CMD_ADDRESS_LIST );
-
-            char buffer[2048] = { 0 };
-            ssize_t length = 0;
-            if( (length = gnw_wait( data_fd, GNW_ACK, buffer, 2048 )) > 0 ) {
-                printf( "Got ACK\n" );
-            }
-        }
-
-    } while( ++index < argc );
-
-    return EXIT_SUCCESS;
-}
-
 int main(int argc, char ** argv ) {
+    struct sigaction sa;
+    sa.sa_handler = sigint_handler;
+    sigemptyset( &sa.sa_mask );
+    sa.sa_flags = SA_RESTART;
+
+    sigaction( SIGINT, &sa, NULL );
+    sigaction( SIGHUP, &sa, NULL );
+    sigaction( SIGKILL, &sa, NULL );
+
+
     // Argument Parsing //
     char arg;
-    while( (arg = getopt(argc, argv, "p:t:dqio")) != -1 ) {
+    while( (arg = getopt(argc, argv, "p:t:dio")) != -1 ) {
         switch( arg ) {
             case 'p':
                 arg_router_port = (uint16_t)strtoul( optarg, NULL, 10 );
@@ -249,9 +265,6 @@ int main(int argc, char ** argv ) {
                     fail( "Cannot be both an input *and* an output node! STOP." );
                 mode_output = true;
                 break;
-
-            case 'q':
-                return queryMode( argc, argv, optind );
 
             case '?':
                 printf( "Opt: %s, Arg: %s\n", optopt, optarg );
@@ -282,6 +295,7 @@ int main(int argc, char ** argv ) {
         if( length < 0) {
             fprintf(stderr, "Error while waiting for router ACK response. STOP.\n");
             close( data_fd );
+            external_shutdown();
             exit( EXIT_FAILURE );
         }
 
@@ -330,6 +344,8 @@ int main(int argc, char ** argv ) {
                 memset( buffer, 0, 1024 );
                 ssize_t readBytes = read( watch_fd[0].fd, buffer, 1024 );
 
+                fprintf( stderr, "Read: %llu B\n", readBytes );
+
                 if( readBytes == 0 ) {
                     fprintf( stderr, "Input shut down, stopping." );
                     break;
@@ -341,6 +357,7 @@ int main(int argc, char ** argv ) {
 
         // Done, close the FD
         close( data_fd );
+        external_shutdown();
         return EXIT_SUCCESS;
     }
 
@@ -352,19 +369,23 @@ int main(int argc, char ** argv ) {
         watch_fd[0].fd = data_fd;
         watch_fd[0].events = POLLIN;
 
-        char buffer[1024] = { 0 };
+        char buffer[4096] = { 0 };
 
         int rv = 0;
         while( (rv = poll(watch_fd, 1, 0)) != -1 ) {
             if( rv > 0 ) {
-                memset( buffer, 0, 1024 );
-                ssize_t readBytes = read( watch_fd[0].fd, buffer, 1024 );
+                memset( buffer, 0, 4096 );
+                ssize_t readBytes = read( watch_fd[0].fd, buffer, 4096 );
 
                 if( readBytes == 0 ) {
                     fprintf( stderr, "NULL read, lost connection to router?\n" );
                     break;
                 }
-                ssize_t writeBytes = write( STDOUT_FILENO, buffer + sizeof(gnw_header_t), readBytes - sizeof(gnw_header_t) );
+
+                char * payload = buffer + sizeof( gnw_header_t );
+                ssize_t writeBytes = write( STDOUT_FILENO, payload, readBytes - sizeof(gnw_header_t) );
+
+                fprintf( stderr, "Wrote: (%llu) %llu B\n", readBytes - sizeof(gnw_header_t), writeBytes );
 
                 assert( readBytes - sizeof(gnw_header_t) == writeBytes, "Could not push all received bytes to the terminal. Data has been lost." );
             }
@@ -372,6 +393,7 @@ int main(int argc, char ** argv ) {
 
         // Done, close the FD
         close( data_fd );
+        external_shutdown();
         return EXIT_SUCCESS;
     }
 
@@ -382,9 +404,6 @@ int main(int argc, char ** argv ) {
     // Search using the system path for the 'real' binary
     findRealPath( inner_binary, argv[inner_binary_index] );
 
-    fprintf( stdout, "Found @ %s\n", inner_binary );
-    fflush( stdout );
-
     char * newArgs[inner_binary_argc];
     for( int i=0; i<inner_binary_argc; i++ ) {
         newArgs[i] = argv[inner_binary_index + i];
@@ -392,11 +411,13 @@ int main(int argc, char ** argv ) {
     newArgs[inner_binary_argc] = NULL;
 
     // Become two processes, launch the child.
-    pid_t childPID = fork();
+    childPID = fork();
     if( childPID == 0 ) {
         processRunner(PIPE_READ(wrap_stdin), PIPE_WRITE(wrap_stdout), inner_binary, newArgs);
         return EXIT_FAILURE; // Should never happen...
     }
+
+    printf( "CHILD PID:\t%d\n", childPID );
 
     struct pollfd watch_fd[2];
     memset( watch_fd, 0, sizeof( struct pollfd ) * 2 );
@@ -412,7 +433,7 @@ int main(int argc, char ** argv ) {
         int rv = poll( watch_fd, 2, arg_read_timeout * 1000 );
 
         if( rv == -1 ) {        // Error state while poll'ing
-            perror( "select" );
+            fprintf( stderr, "Error during poll cycle for input. Shutting down.\n" );
             break;
         } else if( rv == 0 ) {  // Timed out on poll wait
 
@@ -464,7 +485,7 @@ int main(int argc, char ** argv ) {
         }
     }
 
-    waitpid( -1, NULL, 0 );
+    external_shutdown();
 
     close( PIPE_READ(wrap_stdin) );
     close( PIPE_WRITE(wrap_stdin) );

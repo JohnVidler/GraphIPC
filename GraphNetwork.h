@@ -35,11 +35,11 @@
 #define GNW_STATE_SETUP   0x01
 #define GNW_STATE_RUN     0x02
 #define GNW_STATE_COMMAND 0x03
-#define GNW_STATE_CLOSE   0xFF
+#define GNW_STATE_CLOSE   0xFE
+#define GNW_STATE_ZOMBIE  0xFF
 
 // Valid commands
 #define GNW_CMD_NEW_ADDRESS  1
-#define GNW_CMD_ADDRESS_LIST 2
 
 // Link Constants
 #define GNW_BROADCAST  0
