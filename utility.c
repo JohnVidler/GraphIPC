@@ -28,3 +28,14 @@ uint32_t strlen_array( unsigned int offset, unsigned int length, char ** array )
 
     return count;
 }
+
+const char * const fmt_sizeStr[6] = { "B", "KB", "MB", "GB", "TB", "PB" };
+unsigned long long fmt_humanSize( unsigned long long size, char * unitRef ) {
+    unsigned long long mul = 0;
+    while( size > 1024 ) {
+        size = size / 1024;
+        printf( "Size: %llu %s\n", size, fmt_sizeStr[mul] );
+        mul++;
+    }
+    return size;
+}

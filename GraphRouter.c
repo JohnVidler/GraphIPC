@@ -25,17 +25,20 @@
 #include <pthread.h>
 #include <assert.h>
 #include "GraphNetwork.h"
+#include "RingBuffer.h"
 #include <glib-2.0/glib.h>
 #include <getopt.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 
+#define MAX_BUFFER_SIZE   4096
 #define COMMAND_PIPE_PATH "/tmp/GraphRouter.pipe"
 
 typedef struct client_context {
     uint64_t address;
     pthread_t * thread_state;
     int socket_fd;
+    RingBuffer_t * rx_buffer;
     int state;
     uint64_t bytes_in;
     uint64_t bytes_out;
@@ -48,7 +51,6 @@ typedef struct client_context {
 GList * client_list = NULL;
 pthread_mutex_t client_list_mutex;
 
-volatile uint64_t cleanup = 0;
 volatile uint64_t nextAddress = 1;
 
 int getListenSocket( struct addrinfo * hints ) {
@@ -90,17 +92,6 @@ int getListenSocket( struct addrinfo * hints ) {
     freeaddrinfo( server_info );
 
     return sockfd;
-}
-
-const char * const fmt_sizeStr[6] = { "B", "KB", "MB", "GB", "TB", "PB" };
-unsigned long long fmt_humanSize( unsigned long long size, char * unitRef ) {
-    unsigned long long mul = 0;
-    while( size > 1024 ) {
-        size = size / 1024;
-        printf( "Size: %llu %s\n", size, fmt_sizeStr[mul] );
-        mul++;
-    }
-    return size;
 }
 
 void emitStatistics( FILE * stream ) {
@@ -174,6 +165,14 @@ void emitStatistics( FILE * stream ) {
     fprintf( stream, "\n" );
 }
 
+void context_cleanup( client_context_t * context ) {
+    context->state = GNW_STATE_CLOSE;
+    close( context->socket_fd );
+    ringbuffer_destroy( context->rx_buffer );
+
+    free( context );
+}
+
 void * clientProcess( void * _context ) {
     client_context_t * context = (client_context_t *)_context;
     context->state = GNW_STATE_OPEN;
@@ -182,6 +181,9 @@ void * clientProcess( void * _context ) {
     gnw_format_address( clientAddress, context->address );
 
     printf( "%s\tState: OPEN\n", clientAddress );
+
+    // Fire up our ring buffer
+    context->rx_buffer = ringbuffer_init( MAX_BUFFER_SIZE );
 
     // Say hello to the client
     gnw_emitCommandPacket( context->socket_fd, GNW_ACK, NULL, 0 );
@@ -194,9 +196,7 @@ void * clientProcess( void * _context ) {
 
         if( length < 1 ) {
             fprintf( stderr, "%s\tIO error, dropping client.\n", clientAddress );
-            context->state = GNW_STATE_CLOSE;
-            close( context->socket_fd );
-            cleanup++;
+            context_cleanup( context );
             return NULL;
         }
         gnw_header_t * header = (gnw_header_t *)buffer;
@@ -205,10 +205,8 @@ void * clientProcess( void * _context ) {
             printf( "Command packet\n" );
 
             if( length - sizeof( gnw_header_t ) <= 0 ) {
-                close( context->socket_fd );
-                context->state = GNW_STATE_CLOSE;
                 printf( "%s\tBad state, sent command with no payload? Dropped client.\n", clientAddress );
-                cleanup++;
+                context_cleanup( context );
                 return NULL;
             }
 
@@ -266,10 +264,8 @@ void * clientProcess( void * _context ) {
         }
     }
 
-    close( context->socket_fd );
-    context->state = GNW_STATE_CLOSE;
     printf( "%s\nState: CLOSE.\n", clientAddress );
-    cleanup++;
+    context_cleanup( context );
     return NULL;
 }
 
@@ -371,6 +367,7 @@ int router_process() {
 
         int result = pthread_create( new_context->thread_state, NULL, clientProcess, new_context );
         assert( !result );
+        pthread_detach( *new_context->thread_state ); // Release the thread, so it auto cleans on exit without a join()
         pthread_mutex_lock( &client_list_mutex );
         client_list = g_list_prepend( client_list, new_context );
         pthread_mutex_unlock( &client_list_mutex );

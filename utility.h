@@ -20,3 +20,5 @@
 #include <stdint.h>
 
 uint32_t strlen_array( unsigned int offset, unsigned int length, char ** array );
+
+unsigned long long fmt_humanSize( unsigned long long size, char * unitRef );

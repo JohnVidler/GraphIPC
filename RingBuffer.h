@@ -3,6 +3,7 @@
 //
 
 #include <semaphore.h>
+#include <unitypes.h>
 
 #pragma ONCE
 
@@ -14,12 +15,16 @@ typedef struct {
     void * tail;
 } RingBuffer_t;
 
+void ringbuffer_print( RingBuffer_t * root );
+
 RingBuffer_t * ringbuffer_init( size_t size );
 
 bool ringbuffer_destroy(RingBuffer_t * ring );
 
 ssize_t ringbuffer_length( RingBuffer_t * root );
 
+uint8_t ringbuffer_peek( RingBuffer_t * root );
+
 ssize_t ringbuffer_read( RingBuffer_t * root, void * buffer, ssize_t maxLength );
 
-ssize_t ringbuffer_write( RingBuffer_t * root, void * buffer, ssize_t length );
+ssize_t ringbuffer_write( RingBuffer_t * root, void * buffer, size_t length );

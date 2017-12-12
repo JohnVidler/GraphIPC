@@ -19,12 +19,12 @@ find_package( Threads )
 add_library( GraphNetwork GraphNetwork.c GraphNetwork.h )
 add_library( RingBuffer RingBuffer.c RingBuffer.h )
 
-add_executable( GraphWrap GraphWrap.c utility.c GraphNetwork.h )
+add_executable( GraphWrap GraphWrap.c utility.c utility.h GraphNetwork.h )
 target_link_libraries( GraphWrap GraphNetwork RingBuffer )
 
 add_executable( ArgTest ArgTest.c )
 
-add_executable( GraphRouter GraphRouter.c utility.c GraphNetwork.h )
+add_executable( GraphRouter GraphRouter.c utility.c utility.h GraphNetwork.h )
 target_link_libraries( GraphRouter ${CMAKE_THREAD_LIBS_INIT} ${GLIB_LIBRARIES} GraphNetwork RingBuffer )
 
 add_executable( UnitTests UnitTests.c )
