@@ -15,26 +15,29 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-#include <stdbool.h>
+#pragma once
 
-#pragma ONCE;
+#include <stdbool.h>
+#include "RingBuffer.h"
+//#include "RingBuffer.h"
 
 #define GNW_VERSION  1
 
-#define GNW_INVALID  0
-#define GNW_DATA     1
-#define GNW_ACK      2
-#define GNW_NACK     3
-#define GNW_COMMAND  100
+#define GNW_MAGIC 0x55
+
+// Max 4-bit number! 0x0->0xF
+#define GNW_INVALID  0x0
+#define GNW_DATA     0x1
+#define GNW_ACK      0x2
+#define GNW_NACK     0x3
+#define GNW_COMMAND  0xF
 
 // Used for wait commands that can accept any packet type
 #define GNW_ANY      0
 
 // Client states
 #define GNW_STATE_OPEN    0x00
-#define GNW_STATE_SETUP   0x01
 #define GNW_STATE_RUN     0x02
-#define GNW_STATE_COMMAND 0x03
 #define GNW_STATE_CLOSE   0xFE
 #define GNW_STATE_ZOMBIE  0xFF
 
@@ -66,10 +69,10 @@ typedef struct {
 } gnw_stats_t;
 
 typedef struct {
-    unsigned int version  : 4;
-    unsigned int flags    : 4;
-    unsigned int type     : 8;
-    unsigned int reserved : 16;   // Probably will become a sequence number, but reserved for now
+    unsigned int magic   : 8;
+    unsigned int version : 4;
+    unsigned int type    : 4;
+    unsigned int length  : 16;
 } __attribute__((packed, aligned(8))) gnw_header_t;
 
 
@@ -83,4 +86,4 @@ void gnw_emitCommandPacket( int fd, uint8_t type, char * buffer, ssize_t length 
 
 void gnw_sendCommand( int fd, uint8_t command );
 
-ssize_t gnw_wait( int fd, uint8_t type, char * buffer, ssize_t maxLen );
+bool gnw_nextHeader( RingBuffer_t * buffer, gnw_header_t * header );

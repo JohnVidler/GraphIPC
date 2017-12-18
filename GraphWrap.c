@@ -23,12 +23,16 @@
 #include <errno.h>
 #include "utility.h"
 #include "GraphNetwork.h"
+#include "RingBuffer.h"
 #include <string.h>
 #include <stdbool.h>
 #include <sys/stat.h>
 #include <syslog.h>
 #include <netdb.h>
 #include <poll.h>
+
+#define MAX_BUFFER_SIZE   40
+#define MAX_INPUT_BUFFER  10
 
 #define LOG_NAME "GraphWrap"
 
@@ -280,32 +284,36 @@ int main(int argc, char ** argv ) {
     if( data_fd < 0 )
         fail( "Unable to get a connection to the graph router. STOP." );
 
-    char buffer[128] = { 0 };
-    if( gnw_wait(data_fd, GNW_ACK, buffer, 128) < 0 )
-        fail( "No response from router. STOP." );
+    char iBuffer[MAX_INPUT_BUFFER] = { 0 };
+    RingBuffer_t * rx_buffer = ringbuffer_init( MAX_BUFFER_SIZE );
 
     gnw_sendCommand( data_fd, GNW_CMD_NEW_ADDRESS );
 
     int client_state = GNW_STATE_OPEN;
-    gnw_header_t * header = (gnw_header_t *)buffer;
     while( client_state != GNW_STATE_RUN ) {
-        memset( buffer, 0, 128 );
 
-        ssize_t length = gnw_wait( data_fd, GNW_ACK, buffer, 128 );
-        if( length < 0) {
-            fprintf(stderr, "Error while waiting for router ACK response. STOP.\n");
-            close( data_fd );
+        memset( iBuffer, 0, MAX_INPUT_BUFFER );
+
+        ssize_t bytesRead = read( data_fd, iBuffer, MAX_INPUT_BUFFER );
+        if( bytesRead <= 0 ) {
+            fprintf( stderr, "IO Error, halting!\n" );
             external_shutdown();
-            exit( EXIT_FAILURE );
+            return EXIT_FAILURE;
         }
+        if( ringbuffer_write( rx_buffer, iBuffer, bytesRead ) != bytesRead )
+            fprintf( stderr, "Buffer overflow! Data loss occurred!" );
 
-        switch ( client_state ) {
-            case GNW_STATE_OPEN:
-                if( header->type == GNW_ACK && length == sizeof(gnw_header_t) + 8 ) {
-                    graph_address = *(uint64_t *)( buffer + sizeof(gnw_header_t) );
+        gnw_header_t header;
+        if( gnw_nextHeader( rx_buffer, &header ) ) {
+            switch ( client_state ) {
+                case GNW_STATE_OPEN:
+                    ringbuffer_read( rx_buffer, &graph_address, 8 );
+
+                    printf( "Address registered as %llu\n", graph_address );
+
                     client_state = GNW_STATE_RUN;
-                }
-                break;
+                    break;
+            }
         }
     }
 
@@ -336,15 +344,15 @@ int main(int argc, char ** argv ) {
         watch_fd[0].fd = STDIN_FILENO;
         watch_fd[0].events = POLLIN;
 
-        char buffer[1024] = { 0 };
+        char buffer[4096] = { 0 };
 
         int rv = 0;
         while( (rv = poll(watch_fd, 1, 0)) != -1 ) {
             if( rv > 0 ) {
-                memset( buffer, 0, 1024 );
-                ssize_t readBytes = read( watch_fd[0].fd, buffer, 1024 );
+                memset( buffer, 0, 4096 );
+                ssize_t readBytes = read( watch_fd[0].fd, buffer, 4096 );
 
-                fprintf( stderr, "Read: %llu B\n", readBytes );
+                //fprintf( stderr, "Read: %llu B\n", readBytes );
 
                 if( readBytes == 0 ) {
                     fprintf( stderr, "Input shut down, stopping." );
@@ -352,6 +360,8 @@ int main(int argc, char ** argv ) {
                 }
 
                 gnw_emitDataPacket( data_fd, buffer, readBytes );
+
+                usleep( 100 );
             }
         }
 

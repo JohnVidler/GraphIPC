@@ -22,8 +22,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
-#include <poll.h>
 #include "GraphNetwork.h"
+#include "RingBuffer.h"
 
 volatile gnw_stats_t link_stats;
 
@@ -53,7 +53,6 @@ void gnw_dumpPacket( FILE * fd, char * buffer, ssize_t length ) {
             fprintf( fd, "???" );
     }
     fprintf( fd, ")\n" );
-    fprintf( fd, "Flags:\t%x\n", header->flags );
 
     for( int i=0; i<payload_length; i++ ) {
         fprintf( fd, "%02x ", payload[i] );
@@ -70,10 +69,10 @@ void gnw_emitPacket( int fd, char * buffer, ssize_t length ) {
 void gnw_emitDataPacket( int fd, char * buffer, ssize_t length ) {
     link_stats.dataPackets++;
     char * packet = (char *)malloc( length + sizeof(gnw_header_t) );
-    ((gnw_header_t *)packet)->flags    = 0;
-    ((gnw_header_t *)packet)->reserved = 0;
+    ((gnw_header_t *)packet)->magic    = GNW_MAGIC;
     ((gnw_header_t *)packet)->version  = GNW_VERSION;
     ((gnw_header_t *)packet)->type     = GNW_DATA;
+    ((gnw_header_t *)packet)->length   = (uint16_t )length;
 
     if( buffer != NULL )
         memcpy( packet + sizeof(gnw_header_t), buffer, (size_t) length);
@@ -86,10 +85,10 @@ void gnw_emitDataPacket( int fd, char * buffer, ssize_t length ) {
 void gnw_emitCommandPacket( int fd, uint8_t type, char * buffer, ssize_t length ) {
     link_stats.commandPackets++;
     char * packet = (char *)malloc( length + sizeof(gnw_header_t) );
-    ((gnw_header_t *)packet)->flags    = 0;
-    ((gnw_header_t *)packet)->reserved = 0;
+    ((gnw_header_t *)packet)->magic    = GNW_MAGIC;
     ((gnw_header_t *)packet)->version  = GNW_VERSION;
     ((gnw_header_t *)packet)->type     = type;
+    ((gnw_header_t *)packet)->length   = (uint16_t)length;
 
     if( buffer != NULL )
         memcpy( packet + sizeof(gnw_header_t), buffer, (size_t) length);
@@ -104,38 +103,21 @@ void gnw_sendCommand( int fd, uint8_t command ) {
     gnw_emitCommandPacket( fd, GNW_COMMAND, buffer, 1 );
 }
 
-ssize_t gnw_wait( int fd, uint8_t type, char * buffer, ssize_t maxLen ) {
-    struct pollfd watch_fd[1];
-    memset( watch_fd, 0, sizeof( struct pollfd ) * 1 );
 
-    watch_fd[0].fd = fd;
-    watch_fd[0].events = POLLIN;
+bool gnw_nextHeader( RingBuffer_t * buffer, gnw_header_t * header ) {
 
-    int timeout = 10;
-    ssize_t bytes = 0;
-    while( bytes < 1 && timeout-- > 0 ) {
-        printf( "Waiting for %d...\n", type );
-        int rv = poll( watch_fd, 1, 1000 );
-
-        // Wait error, drop back to callee
-        if( rv == -1 )
-            return -1;
-
-        // Timeout :(
-        if( rv == 0 ) {
-            printf( "Timeout :(\n" );
-            continue;
-        }
-
-        bytes = read(fd, buffer, maxLen);
-
-        gnw_header_t *header = (gnw_header_t *) buffer;
-        if (header->type == type || type == GNW_INVALID) {
-            printf("Got %d!\n", header->type);
-            return bytes;
-        }
+    uint8_t discard = 0;
+    while( ringbuffer_length(buffer) > 0 && ringbuffer_peek( buffer ) != GNW_MAGIC ) {
+        ringbuffer_read( buffer, &discard, 1 );
     }
 
-    fprintf( stderr, "Err: Timeout waiting for command (%d)\n", type );
-    return -1;
+    if( ringbuffer_peek(buffer) != GNW_MAGIC )
+        return false;
+
+    if( ringbuffer_length(buffer) < sizeof(gnw_header_t) )
+        return false;
+
+    memset( header, 0, sizeof(gnw_header_t) );
+    ringbuffer_read( buffer, header, sizeof(gnw_header_t) );
+    return true;
 }

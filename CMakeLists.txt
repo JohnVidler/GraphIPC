@@ -16,16 +16,17 @@ include_directories( "/usr/lib/lfds/" )
 
 find_package( Threads )
 
-add_library( GraphNetwork GraphNetwork.c GraphNetwork.h )
 add_library( RingBuffer RingBuffer.c RingBuffer.h )
+add_library( GraphNetwork GraphNetwork.c GraphNetwork.h )
+add_library( Assert Assert.c Assert.h )
 
 add_executable( GraphWrap GraphWrap.c utility.c utility.h GraphNetwork.h )
-target_link_libraries( GraphWrap GraphNetwork RingBuffer )
+target_link_libraries( GraphWrap ${CMAKE_THREAD_LIBS_INIT} GraphNetwork RingBuffer Assert )
 
 add_executable( ArgTest ArgTest.c )
 
-add_executable( GraphRouter GraphRouter.c utility.c utility.h GraphNetwork.h )
-target_link_libraries( GraphRouter ${CMAKE_THREAD_LIBS_INIT} ${GLIB_LIBRARIES} GraphNetwork RingBuffer )
+add_executable( GraphRouter GraphRouter.c utility.c utility.h GraphNetwork.h Assert.c Assert.h)
+target_link_libraries( GraphRouter ${CMAKE_THREAD_LIBS_INIT} ${GLIB_LIBRARIES} GraphNetwork RingBuffer Assert )
 
 add_executable( UnitTests UnitTests.c )
-target_link_libraries( UnitTests RingBuffer ${CMAKE_THREAD_LIBS_INIT} )
+target_link_libraries( UnitTests RingBuffer ${CMAKE_THREAD_LIBS_INIT} Assert )

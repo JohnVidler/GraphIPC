@@ -7,18 +7,7 @@
 #include <stdbool.h>
 #include <memory.h>
 #include "RingBuffer.h"
-
-unsigned int testsPassed = 0;
-
-void _assert( bool state, char * errorMessage, int line ) {
-    if( !state ) {
-        fprintf( stderr, "%s:%u\tASSERT: %s\n", __FILE__, line, errorMessage );
-        exit( EXIT_FAILURE );
-    }
-    testsPassed++;
-}
-
-#define assert(state, message) _assert( state, message, __LINE__ )
+#include "Assert.h"
 
 void test_ring_buffer() {
     RingBuffer_t * buffer = ringbuffer_init( 128 );
@@ -42,20 +31,28 @@ void test_ring_buffer() {
 
     // Read/Write integrity
 
-    char *longInputTestString = "This booklet has been produced for students at the University of New South Wales";
+    char * longInputTestString = "This booklet has been produced for students at the University of New South Wales";
     assert( ringbuffer_write( buffer, longInputTestString, strlen(longInputTestString) ) == strlen(longInputTestString), "Ring refused to write new data" );
 
-    assert( ringbuffer_peek( buffer ) == 'T', "Peek'd value is not as expected" );
+    for( int i=0; i<strlen(longInputTestString); i++ ) {
+        char tmp = 0;
+        assert( ringbuffer_read( buffer, &tmp, 1 ) == 1, "Could not pull 1 byte from the ring buffer" );
+        assertEqual( tmp, longInputTestString[i] );
+    }
 
-    char longOutputTestString[ 128 ] = { 0 };
-    assert( ringbuffer_read( buffer, longOutputTestString, 128 ) == 80, "Did not completely drain the buffer! (Or over-read!)" );
+    char overReadBuffer[16] = { 0 };
+    assert( ringbuffer_read( buffer, overReadBuffer, 16 ) == 0, "Should not have been able to read any data from the buffer!" );
+
+
 }
 
 int main(int argc, char * argv ) {
 
+    setReportAssert( false );
+    setExitOnAssert( false );
+
     test_ring_buffer();
 
-    printf( "%u Tests passed.\n", testsPassed );
     printf( "Done. Bye\n" );
 
     return EXIT_SUCCESS;

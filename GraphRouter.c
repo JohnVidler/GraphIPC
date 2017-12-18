@@ -26,12 +26,15 @@
 #include <assert.h>
 #include "GraphNetwork.h"
 #include "RingBuffer.h"
+#include "utility.h"
 #include <glib-2.0/glib.h>
 #include <getopt.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <poll.h>
 
 #define MAX_BUFFER_SIZE   4096
+#define MAX_INPUT_BUFFER  1024
 #define COMMAND_PIPE_PATH "/tmp/GraphRouter.pipe"
 
 typedef struct client_context {
@@ -108,14 +111,8 @@ void emitStatistics( FILE * stream ) {
                 case GNW_STATE_OPEN:
                     sprintf(state_str, "OPEN");
                     break;
-                case GNW_STATE_SETUP:
-                    sprintf(state_str, "SETUP");
-                    break;
                 case GNW_STATE_RUN:
                     sprintf(state_str, "RUN");
-                    break;
-                case GNW_STATE_COMMAND:
-                    sprintf(state_str, "CMD");
                     break;
                 case GNW_STATE_CLOSE:
                     sprintf(state_str, "CLOSE");
@@ -185,8 +182,117 @@ void * clientProcess( void * _context ) {
     // Fire up our ring buffer
     context->rx_buffer = ringbuffer_init( MAX_BUFFER_SIZE );
 
+    printf( "Client poll loop running...\n" );
+
+    struct pollfd watch_fd[1];
+    memset( watch_fd, 0, sizeof( struct pollfd ) * 1 );
+
+    watch_fd[0].fd = context->socket_fd;
+    watch_fd[0].events = POLLIN;
+
+    char iBuffer[MAX_INPUT_BUFFER] = { 0 };
+
+    int logout_timeout = 10;
+    ssize_t bytes = 1;
+    while( bytes > 0 ) {
+        int rv = poll( watch_fd, 1, 1000 );
+
+        // Wait error, drop back to callee
+        if( rv == -1 ) {
+            fprintf( stderr, "IO Error, dropping client %s.\n", clientAddress );
+            context_cleanup( context );
+            return NULL;
+        }
+
+        // Timeout...
+        if( rv == 0 ) {
+            printf( "State: %d\n", context->state );
+            if( context->state == GNW_STATE_OPEN ) {
+                if (logout_timeout-- < 0) {
+                    printf( "Client %s timed out, dropping them.\n", clientAddress );
+                    context_cleanup( context );
+                    return NULL;
+                }
+            }
+
+            continue;
+        }
+
+        memset( iBuffer, 0, MAX_INPUT_BUFFER );
+        bytes = read( context->socket_fd, iBuffer, MAX_INPUT_BUFFER );
+        if( ringbuffer_write( context->rx_buffer, iBuffer, bytes ) != bytes )
+            fprintf( stderr, "Buffer overflow! Data loss occurred!" );
+
+        gnw_header_t header;
+        memset( &header, 0, sizeof(gnw_header_t) );
+
+        if( gnw_nextHeader( context->rx_buffer, &header ) ) {
+            switch( context->state ) {
+                case GNW_STATE_OPEN: {
+
+                    void * payload = NULL;
+                    if( header.length > 0 ) {
+                        payload = malloc(header.length);
+                        ringbuffer_read(context->rx_buffer, payload, header.length);
+                    }
+
+                    if( header.type == GNW_COMMAND ) {
+                        if( payload == NULL ) {
+                            printf( "Bad command packet, skipping.\n" );
+                            break;
+                        }
+
+                        // Address request
+                        if( *(uint8_t *)payload == GNW_CMD_NEW_ADDRESS ) {
+                            printf( "Client requested its address, sending.\n" );
+                            gnw_emitCommandPacket( context->socket_fd, GNW_ACK, (char *)&(context->address), 8 );
+
+                            context->state = GNW_STATE_RUN; // Move to the 'run' state
+                        }
+                    }
+
+                    // Free the payload, if there is one
+                    if( payload != NULL )
+                        free( payload );
+                }
+                break;
+
+                case GNW_STATE_RUN: {
+                    printf( "Unimplemented State!\n" );
+
+                    void * payload = NULL;
+                    if( header.length > 0 ) {
+                        payload = malloc(header.length);
+                        ringbuffer_read(context->rx_buffer, payload, header.length);
+                    }
+
+                    // Discard stuff :|
+
+                    if( payload != NULL )
+                        free( payload );
+                }
+                break;
+
+                default:
+                    fprintf( stderr, "Bad system state! Killing client process!\n" );
+                    context_cleanup( context );
+                    return NULL;
+            }
+        }
+
+        //ringbuffer_print( context->rx_buffer );
+    }
+
+
+
+
+
+
+
+
+
     // Say hello to the client
-    gnw_emitCommandPacket( context->socket_fd, GNW_ACK, NULL, 0 );
+    /*gnw_emitCommandPacket( context->socket_fd, GNW_ACK, NULL, 0 );
 
     // Wait for instructions...
     char buffer[128] = { 0 };
@@ -226,9 +332,6 @@ void * clientProcess( void * _context ) {
         }
     }
 
-    /*const char * tempBuffer = "Contrary to popular belief, Lorem Ipsum is not simply random text. It has roots in a piece of classical Latin literature from 45 BC, making it over 2000 years old. Richard McClintock, a Latin professor at Hampden-Sydney College in Virginia, looked up one of the more obscure Latin words, consectetur, from a Lorem Ipsum passage, and going through the cites of the word in classical literature, discovered the undoubtable source. Lorem Ipsum comes from sections 1.10.32 and 1.10.33 of \"de Finibus Bonorum et Malorum\" (The Extremes of Good and Evil) by Cicero, written in 45 BC. This book is a treatise on the theory of ethics, very popular during the Renaissance. The first line of Lorem Ipsum, \"Lorem ipsum dolor sit amet..\", comes from a line in section 1.10.32.";
-    write( remote_fd, tempBuffer, strlen(tempBuffer) );*/
-
     if( context->state == GNW_STATE_RUN ) {
         ssize_t bytesRead = 1;
         while (bytesRead > 0) {
@@ -262,7 +365,7 @@ void * clientProcess( void * _context ) {
                     fprintf( stderr, "Unsupported or bad link policy! Skipped.\n" );
             }
         }
-    }
+    }*/
 
     printf( "%s\nState: CLOSE.\n", clientAddress );
     context_cleanup( context );
@@ -341,8 +444,6 @@ int router_process() {
     pthread_t command_context;
     pthread_create( &command_context, NULL, commandProcess, NULL );
 
-    client_context_t * old_context = NULL;
-
     while( 1 ) {
         struct sockaddr_storage remote_socket;
         socklen_t newSock_len = sizeof( socklen_t );
@@ -362,17 +463,12 @@ int router_process() {
         for( int i=0; i<GNW_MAX_LINKS; i++ )
             new_context->links[i] = NULL;
 
-        if( old_context != NULL )
-            new_context->links[0] = old_context;
-
         int result = pthread_create( new_context->thread_state, NULL, clientProcess, new_context );
         assert( !result );
         pthread_detach( *new_context->thread_state ); // Release the thread, so it auto cleans on exit without a join()
         pthread_mutex_lock( &client_list_mutex );
         client_list = g_list_prepend( client_list, new_context );
         pthread_mutex_unlock( &client_list_mutex );
-
-        old_context = new_context;
 
         //printf( "%d active threads...\n", g_list_length( client_list ) );
     }
