@@ -106,18 +106,35 @@ void gnw_sendCommand( int fd, uint8_t command ) {
 
 bool gnw_nextHeader( RingBuffer_t * buffer, gnw_header_t * header ) {
 
+    // Try to find a magic byte...
     uint8_t discard = 0;
-    while( ringbuffer_length(buffer) > 0 && ringbuffer_peek( buffer ) != GNW_MAGIC ) {
-        ringbuffer_read( buffer, &discard, 1 );
+    while (ringbuffer_length(buffer) > 0 && ringbuffer_peek(buffer, 0) != GNW_MAGIC) {
+        ringbuffer_read(buffer, &discard, 1);
     }
 
-    if( ringbuffer_peek(buffer) != GNW_MAGIC )
+    // Bail if we can't fit an entire header into the remaining buffer
+    if (ringbuffer_length(buffer) < sizeof(gnw_header_t))
         return false;
 
-    if( ringbuffer_length(buffer) < sizeof(gnw_header_t) )
+    // Otherwise, check the header length field, check if its' sane
+    uint16_t packet_length = (uint16_t) ((((ringbuffer_peek(buffer, 2 ) << 8) & 0xFF00) | (ringbuffer_peek(buffer, 3 ) & 0xFF)) & 0xFFFF);
+
+    // If it fits, grab the header properly and return
+    if( packet_length <= ringbuffer_length(buffer) ) {
+        memset( header, 0, sizeof(gnw_header_t) );
+        ringbuffer_read( buffer, header, sizeof(gnw_header_t) );
+
+        return true;
+    }
+
+    if( ringbuffer_peek(buffer, 0) != GNW_MAGIC )
+        return false;
+
+    if(ringbuffer_length(buffer) < sizeof(gnw_header_t) )
         return false;
 
     memset( header, 0, sizeof(gnw_header_t) );
     ringbuffer_read( buffer, header, sizeof(gnw_header_t) );
+
     return true;
 }

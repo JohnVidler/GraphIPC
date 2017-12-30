@@ -21,7 +21,7 @@
 #include <stdio.h>
 #include <memory.h>
 #include <unitypes.h>
-#include <assert.h>
+#include "Assert.h"
 #include "RingBuffer.h"
 
 void ringbuffer_print( RingBuffer_t * root ) {
@@ -30,7 +30,7 @@ void ringbuffer_print( RingBuffer_t * root ) {
     printf( "\tEnd:\t%llu\n", root->end - root->start );
     printf( "\tHead:\t%llu\n", root->head - root->start );
     printf( "\tTail:\t%llu\n", root->tail - root->start );
-    printf( "\tLength:\t%llu\n", ringbuffer_length(root) );*/
+    printf( "\tLength:\t%llu\n", ringbuffer_capacity(root) );*/
 
     printf( "[" );
     char * tmp = root->start;
@@ -61,7 +61,7 @@ void ringbuffer_print( RingBuffer_t * root ) {
     fflush( stdout );
 }
 
-ssize_t minValue( ssize_t a, ssize_t b ) {
+ssize_t minValue( size_t a, size_t b ) {
     if( a < b )
         return a;
     return b;
@@ -70,11 +70,13 @@ ssize_t minValue( ssize_t a, ssize_t b ) {
 RingBuffer_t * ringbuffer_init(size_t size)
 {
     RingBuffer_t * root = (RingBuffer_t *)malloc( sizeof(RingBuffer_t) + size );
-    void * ring = root + sizeof(RingBuffer_t);
+    void * ring = (void *)root + sizeof(RingBuffer_t);
     root->start = ring;
     root->end   = ring + size;
     root->head  = ring;
     root->tail  = ring;
+
+    root->capacity = size;
 
     sem_init( &(root->lock), 0, 1 );
 
@@ -84,112 +86,106 @@ RingBuffer_t * ringbuffer_init(size_t size)
 bool ringbuffer_destroy( RingBuffer_t * root )
 {
     sem_wait( &(root->lock) );
-    if( root->head == root->tail ) {
-        sem_destroy( &(root->lock) );
-        free( root );
-        return true;
-    }
-
-    sem_post( &(root->lock) );
-    return false;
+    sem_destroy( &(root->lock) );
+    free( root );
+    return true;
 }
 
-ssize_t ringbuffer_length( RingBuffer_t * root ) {
+size_t ringbuffer_capacity(RingBuffer_t *root) {
+    return root->capacity - ringbuffer_length( root ) - 1;
+}
 
-    if( root->head >= root->tail )
+size_t ringbuffer_length( RingBuffer_t *root ) {
+    if( root->head == root->tail )
+        return 0;
+
+    if( root->head > root->tail )
         return root->head - root->tail;
-    return (root->head - root->start) + (root->end - root->tail);
+    return (root->end - root->tail) + (root->head - root->start);
 }
 
 ssize_t ringbuffer_read( RingBuffer_t * root, void * buffer, ssize_t maxLength )
 {
     sem_wait( &(root->lock) );
 
-    ssize_t readLength = minValue( ringbuffer_length( root ), maxLength );
+    size_t readLength = minValue(ringbuffer_length(root), maxLength );
 
-    // Nothing to read (or zero length output buffer)
+    assert( readLength <= root->capacity, "Length overflow, attempted read was larger than the buffer ever was." );
+
     if( readLength == 0 ) {
         sem_post( &(root->lock) );
         return 0;
     }
 
-    // From herein, there is no need to check the read length, as the
-    // minValue length lookup above prevents the buffer from being over-read.
-    // -John
+    if( readLength <= root->end - root->tail ) {
 
-    if( root->tail < root->head ) {
-        memcpy( buffer, root->tail, readLength );
+        if( buffer != NULL )
+            memcpy( buffer, root->tail, readLength ); // Basic single copy
+
         root->tail += readLength;
+        if( root->tail >= root->end )
+            root->tail = root->start;
+
         sem_post( &(root->lock) );
         return readLength;
     }
 
-    // Danger of wandering into NULL space, might need to make two copy ops :(
-    ssize_t rightLength = root->end - root->tail;
-    if( rightLength < readLength ) {
-        memcpy(buffer, root->tail, rightLength); // Copy to the end of the first block
-        memcpy(buffer + rightLength, root->start, readLength-rightLength); // Then fill out with the rest
-
-        root->tail = root->start + readLength-rightLength;
-    } else {
-        // We can do this in one copy
-        memcpy( buffer, root->tail, readLength );
-        root->tail += readLength;
+    if( buffer != NULL ) {
+        memcpy(buffer, root->tail, root->end - root->tail);
+        memcpy(buffer + (root->end - root->tail), root->start, readLength - (root->end - root->tail));
     }
+
+    root->tail += readLength;
+    if( root->tail >= root->end )
+        root->tail = root->start + (root->tail - root->end);
 
     sem_post( &(root->lock) );
     return readLength;
 }
 
-uint8_t ringbuffer_peek( RingBuffer_t * root ) {
+uint8_t ringbuffer_peek( RingBuffer_t * root, size_t offset ) {
     sem_wait( &(root->lock) );
-    uint8_t tmp = *(uint8_t *)(root->tail);
-    sem_post( &(root->lock) );
 
+    void * ref = root->tail + (offset % root->capacity);
+    if( ref > root->end )
+        ref = root->start + ( root->tail + (offset % root->capacity) - root->end );
+
+    uint8_t tmp = *(uint8_t *)(ref);
+    sem_post( &(root->lock) );
     return tmp;
 }
 
 ssize_t ringbuffer_write( RingBuffer_t * root, void * buffer, size_t length ) {
     sem_wait( &(root->lock) );
 
-    if( root->head < root->tail ) {
-        // Danger of overwriting the tail
-        size_t rightLen = root->head - root->tail;
-        if( rightLen > length ) {
-            sem_post( &(root->lock) );
-            return 0; // No space left!
-        }
+    size_t space = ringbuffer_capacity(root);
 
-        memcpy( root->head, buffer, rightLen );
-        root->head = root->head + rightLen;
+    // Does it fit -at-all- ?
+    if( space <= length ) {
+        sem_post(&(root->lock));
+        return 0;
+    }
+
+    // If it fits in the remaining space
+    size_t rspace = root->end - root->head;
+    if( length < rspace ) {
+        memcpy(root->head, buffer, length);
+
+        // Update head, loop if required
+        root->head = root->head + length;
+        if( root->head > root->end )
+            root->head = root->start;
 
         sem_post( &(root->lock) );
         return length;
     }
-    else
-    {
-        size_t rightLen = root->end - root->head;
 
-        if( rightLen < length ) {
-            size_t leftLen = root->tail - root->start;
+    // It still fits, but needs to be split
+    memcpy( root->head, buffer, rspace );
+    memcpy( root->start, buffer+rspace, length-rspace );
 
-            if( leftLen + rightLen < length ) {
-                sem_post( &(root->lock) );
-                return 0; // No space left!
-            }
-
-            memcpy( root->head, buffer, rightLen ); // Write the initial space
-            memcpy( root->start, buffer+rightLen, length-rightLen ); // Write the remaining data
-            root->head = root->start + (length - rightLen); // Update the head pointer
-
-            sem_post( &(root->lock) );
-            return length;
-        }
-
-        // If here, then there's enough space in the right-hand-side to fit the copy
-        memcpy( root->head, buffer, length ); // Write buffer
-        root->head += length;
-    }
+    // Update the head
+    root->head = root->start + (length-rspace);
 
     sem_post( &(root->lock) );
     return length;

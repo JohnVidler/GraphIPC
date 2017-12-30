@@ -75,7 +75,6 @@ typedef struct {
     unsigned int length  : 16;
 } __attribute__((packed, aligned(8))) gnw_header_t;
 
-
 void gnw_format_address( char * buffer, uint64_t address );
 
 void gnw_dumpPacket( FILE * fd, char * buffer, ssize_t length );

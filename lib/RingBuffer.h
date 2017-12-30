@@ -26,6 +26,7 @@ typedef struct {
     void * end;
     void * head;
     void * tail;
+    uint64_t capacity;
 } RingBuffer_t;
 
 void ringbuffer_print( RingBuffer_t * root );
@@ -34,9 +35,11 @@ RingBuffer_t * ringbuffer_init( size_t size );
 
 bool ringbuffer_destroy(RingBuffer_t * ring );
 
-ssize_t ringbuffer_length( RingBuffer_t * root );
+size_t ringbuffer_capacity(RingBuffer_t *root);
 
-uint8_t ringbuffer_peek( RingBuffer_t * root );
+size_t ringbuffer_length( RingBuffer_t *root );
+
+uint8_t ringbuffer_peek( RingBuffer_t * root, size_t offset );
 
 ssize_t ringbuffer_read( RingBuffer_t * root, void * buffer, ssize_t maxLength );
 

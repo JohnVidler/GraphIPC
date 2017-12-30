@@ -24,9 +24,9 @@
 #include <netdb.h>
 #include <pthread.h>
 #include <assert.h>
-#include "GraphNetwork.h"
-#include "RingBuffer.h"
-#include "utility.h"
+#include "lib/GraphNetwork.h"
+#include "lib/RingBuffer.h"
+#include "lib/utility.h"
 #include <glib-2.0/glib.h>
 #include <getopt.h>
 #include <sys/stat.h>
@@ -220,11 +220,16 @@ void * clientProcess( void * _context ) {
 
         memset( iBuffer, 0, MAX_INPUT_BUFFER );
         bytes = read( context->socket_fd, iBuffer, MAX_INPUT_BUFFER );
+        context->bytes_in += bytes; // Update counters
+
         if( ringbuffer_write( context->rx_buffer, iBuffer, bytes ) != bytes )
             fprintf( stderr, "Buffer overflow! Data loss occurred!" );
 
         gnw_header_t header;
         memset( &header, 0, sizeof(gnw_header_t) );
+
+        printf( "<<<\tPayload: %llu/%llu B\n", header.length, ringbuffer_capacity(context->rx_buffer) );
+        //ringbuffer_print( context->rx_buffer ); // Debug
 
         if( gnw_nextHeader( context->rx_buffer, &header ) ) {
             switch( context->state ) {
@@ -232,7 +237,7 @@ void * clientProcess( void * _context ) {
 
                     void * payload = NULL;
                     if( header.length > 0 ) {
-                        payload = malloc(header.length);
+                        payload = malloc(header.length); // Probably should move this to a static 'processing' buffer
                         ringbuffer_read(context->rx_buffer, payload, header.length);
                     }
 
@@ -258,15 +263,21 @@ void * clientProcess( void * _context ) {
                 break;
 
                 case GNW_STATE_RUN: {
-                    printf( "Unimplemented State!\n" );
+                    //printf( "Unimplemented State!\n" );
 
                     void * payload = NULL;
                     if( header.length > 0 ) {
-                        payload = malloc(header.length);
+                        payload = malloc(header.length); // Probably should move this to a static 'processing' buffer
                         ringbuffer_read(context->rx_buffer, payload, header.length);
                     }
 
+                    gnw_sendCommand( context->socket_fd, GNW_ACK );
+
+                    printf( "<<<\t%s\n", (char *)payload );
+
                     // Discard stuff :|
+
+                    printf( "<<<\tPayload: %llu/%llu B\n", header.length, ringbuffer_capacity(context->rx_buffer) );
 
                     if( payload != NULL )
                         free( payload );
@@ -282,90 +293,6 @@ void * clientProcess( void * _context ) {
 
         //ringbuffer_print( context->rx_buffer );
     }
-
-
-
-
-
-
-
-
-
-    // Say hello to the client
-    /*gnw_emitCommandPacket( context->socket_fd, GNW_ACK, NULL, 0 );
-
-    // Wait for instructions...
-    char buffer[128] = { 0 };
-    while( context->state != GNW_STATE_RUN ) {
-        memset( buffer, 0, 128 );
-        ssize_t length = gnw_wait( context->socket_fd, GNW_COMMAND, buffer, 128 );
-
-        if( length < 1 ) {
-            fprintf( stderr, "%s\tIO error, dropping client.\n", clientAddress );
-            context_cleanup( context );
-            return NULL;
-        }
-        gnw_header_t * header = (gnw_header_t *)buffer;
-        char * data = buffer+sizeof( gnw_header_t );
-        if( header->type == GNW_COMMAND ) {
-            printf( "Command packet\n" );
-
-            if( length - sizeof( gnw_header_t ) <= 0 ) {
-                printf( "%s\tBad state, sent command with no payload? Dropped client.\n", clientAddress );
-                context_cleanup( context );
-                return NULL;
-            }
-
-            switch( *data ) {
-                case GNW_CMD_NEW_ADDRESS:
-                    gnw_emitCommandPacket( context->socket_fd, GNW_ACK, (char *)&(context->address), 8 );
-                    gnw_format_address( clientAddress, context->address );
-
-                    printf( "%s\tState:RUN\n", clientAddress );
-
-                    context->state = GNW_STATE_RUN;
-                    break;
-
-                default:
-                    fprintf( stderr, "Unknown command type [%d], ignored.\n", *data );
-            }
-        }
-    }
-
-    if( context->state == GNW_STATE_RUN ) {
-        ssize_t bytesRead = 1;
-        while (bytesRead > 0) {
-            char buffer[1024] = {0};
-            bytesRead = read(context->socket_fd, buffer, 1024);
-            context->bytes_in += bytesRead;
-
-            //gnw_dumpPacket( stdout, buffer, bytesRead );
-            //printf( "\n" );
-
-            // Apply the forwarding policy
-            switch( context->link_policy ) {
-                case GNW_BROADCAST:
-                    for( int i=0; i<GNW_MAX_LINKS; i++ ) {
-                        if( context->links[i] != NULL ) {
-                            ssize_t bytesWritten = write( context->links[i]->socket_fd, buffer, (size_t)bytesRead );
-                            context->links[i]->bytes_out += bytesWritten;
-                        }
-                    }
-                    break;
-
-                case GNW_ANYCAST:
-                    fprintf( stderr, "Anycast policy not currently supported! Skipped.\n" );
-                    break;
-
-                case GNW_ROUNDROBIN:
-                    fprintf( stderr, "Round-Robin policy not currently supported! Skipped.\n" );
-                    break;
-
-                default:
-                    fprintf( stderr, "Unsupported or bad link policy! Skipped.\n" );
-            }
-        }
-    }*/
 
     printf( "%s\nState: CLOSE.\n", clientAddress );
     context_cleanup( context );
@@ -410,14 +337,6 @@ void * commandProcess( void * none ) {
     return NULL;
 }
 
-void * statisticsProcess(void *none) {
-    while (1) {
-        emitStatistics( stdout );
-
-        sleep( 10 );
-    }
-}
-
 int router_process() {
 
     // Set up the socket server
@@ -437,9 +356,6 @@ int router_process() {
     }
 
     pthread_mutex_init( &client_list_mutex, NULL );
-
-    pthread_t stat_context;
-    pthread_create( &stat_context, NULL, statisticsProcess, NULL );
 
     pthread_t command_context;
     pthread_create( &command_context, NULL, commandProcess, NULL );

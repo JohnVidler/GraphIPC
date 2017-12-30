@@ -21,18 +21,17 @@
 #include <unistd.h>
 #include <wait.h>
 #include <errno.h>
-#include "utility.h"
-#include "GraphNetwork.h"
-#include "RingBuffer.h"
 #include <string.h>
 #include <stdbool.h>
 #include <sys/stat.h>
 #include <syslog.h>
 #include <netdb.h>
 #include <poll.h>
+#include "lib/GraphNetwork.h"
+#include "lib/Assert.h"
 
-#define MAX_BUFFER_SIZE   40
-#define MAX_INPUT_BUFFER  10
+#define MAX_BUFFER_SIZE   512
+#define MAX_INPUT_BUFFER  256
 
 #define LOG_NAME "GraphWrap"
 
@@ -81,17 +80,6 @@ void external_shutdown() {
 void sigint_handler( int signum ) {
     external_shutdown();
     exit( EXIT_SUCCESS );
-}
-
-// Utility Stuff //
-void assert( bool state, char * warning ) {
-    if( state )
-        return;
-
-    if( arg_daemonize )
-        syslog( LOG_WARNING, "ASSERT FAILURE -> %s\n", warning );
-    else
-        fprintf( stderr, "ASSERT FAILURE -> %s\n", warning );
 }
 
 void fail( const char * err ) {
@@ -344,13 +332,13 @@ int main(int argc, char ** argv ) {
         watch_fd[0].fd = STDIN_FILENO;
         watch_fd[0].events = POLLIN;
 
-        char buffer[4096] = { 0 };
+        char buffer[64] = { 0 };
 
         int rv = 0;
         while( (rv = poll(watch_fd, 1, 0)) != -1 ) {
             if( rv > 0 ) {
-                memset( buffer, 0, 4096 );
-                ssize_t readBytes = read( watch_fd[0].fd, buffer, 4096 );
+                memset( buffer, 0, 64 );
+                ssize_t readBytes = read( watch_fd[0].fd, buffer, 64 );
 
                 //fprintf( stderr, "Read: %llu B\n", readBytes );
 
