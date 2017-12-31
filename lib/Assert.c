@@ -31,6 +31,28 @@ bool _assert( bool state, char * errorMessage, char * file, int line ) {
     return true;
 }
 
+bool _assertj( bool state, char * errorMessage, void (* jumpTarget)(char *, int), char * file, int line ) {
+    if( reportAssertCalls ) {
+        printf("%s:%u\tASSERT? '%s'\n", file, line, (state ? "True" : "False"));
+        fflush( stdout );
+    }
+
+    if( !state ) {
+        fprintf( stderr, "%s:%u\tASSERT: %s\n", file, line, errorMessage );
+        fflush( stderr );
+        testsFailed++;
+
+        jumpTarget( file, line );
+
+        if( bailOnAssertFail )
+            exit( EXIT_FAILURE );
+
+        return false;
+    }
+    testsPassed++;
+    return true;
+}
+
 bool _assertEqual( uint64_t a, uint64_t b, char * file, int line ) {
     if( reportAssertCalls ) {
         printf("%s:%u\tASSERT-EQUAL? '%llu' == '%llu' -> %s\n", file, line, a, b, (a == b ? "True" : "False"));

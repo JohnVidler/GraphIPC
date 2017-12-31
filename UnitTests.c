@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <memory.h>
+#include <limits.h>
 #include "lib/Assert.h"
 #include "lib/RingBuffer.h"
 #include "lib/GraphNetwork.h"
@@ -66,28 +67,22 @@ void test_ring_buffer() {
     return;
 }
 
-void generate_noise( RingBuffer_t * buffer, size_t max_length ) {
-    size_t length = (size_t) (rand() % max_length);
-    char data[length];
-    for( size_t i=0; i<length; i++ )
-        data[i] = (char)(rand() % 0xFF);
-
-    ringbuffer_write( buffer, data, length );
+void debugState( char * file, int line ) {
+    //
+    printf( "State debug\n" );
 }
 
 void test_network_sync() {
     RingBuffer_t * rx_buffer = ringbuffer_init( 512 );
 
-    for( int i=0; i<20; i++ ) {
-        generate_noise( rx_buffer, 100 );
-
-        char packet[sizeof( gnw_header_t ) + 10] = { 0 };
+    for( int i=0; i<2000; i++ ) {
+        unsigned char packet[sizeof( gnw_header_t ) + 10] = { 0 };
         gnw_header_t * packer_header = (gnw_header_t *)packet;
         packer_header->magic = GNW_MAGIC;
         packer_header->length = 10;
-        packer_header->type = GNW_ACK;
+        packer_header->type = i;
         packer_header->version = GNW_VERSION;
-        *(char *)(packet + sizeof(gnw_header_t)) = (char)(i % 0xFF);
+        *(char *)(packet + sizeof(gnw_header_t)) = (char)(0x01 << (i%8));
 
         ringbuffer_write( rx_buffer, packet, sizeof( gnw_header_t ) + 10 );
 
@@ -98,16 +93,16 @@ void test_network_sync() {
             if( header.length <= ringbuffer_length( rx_buffer ) ) {
 
                 // Use a static array for a fast internal packet buffer
-                char latch_buffer[ 1024 ];
+                unsigned char latch_buffer[ 1024 ];
                 memset( &latch_buffer, 0, 1024 );
                 assert( ringbuffer_read( rx_buffer, &latch_buffer, header.length ) == header.length, "Couldn't pull the payload from the ring buffer" );
 
-                printf( "%02x %02x %02x %02x {%02x}\n", header.length, header.version, header.type, header.magic, latch_buffer[0] );
+                printf( "%02x -> %02x ? %02x -> %d\n", header.type, latch_buffer[0], 0x01 << (header.type % 8), (unsigned)latch_buffer[0] == (unsigned)0x01 << (header.type % 8) );
 
+                assert( 0x01 << (header.type % 8) == latch_buffer[0], "Payload did not match the expected value" );
             }
         }
     }
-
 
     ringbuffer_destroy( rx_buffer );
 }
@@ -117,7 +112,7 @@ int main(int argc, char * argv ) {
     setReportAssert( false );
     setExitOnAssert( true );
 
-    test_ring_buffer();
+    //test_ring_buffer();
 
     test_network_sync();
 

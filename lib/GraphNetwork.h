@@ -75,13 +75,13 @@ typedef struct {
     unsigned int length  : 16;
 } __attribute__((packed, aligned(8))) gnw_header_t;
 
-void gnw_format_address( char * buffer, uint64_t address );
+void gnw_format_address( unsigned char * buffer, uint64_t address );
 
-void gnw_dumpPacket( FILE * fd, char * buffer, ssize_t length );
+void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length );
 
-void gnw_emitPacket( int fd, char * buffer, ssize_t length );
-void gnw_emitDataPacket( int fd, char * buffer, ssize_t length );
-void gnw_emitCommandPacket( int fd, uint8_t type, char * buffer, ssize_t length );
+void gnw_emitPacket( int fd, unsigned char * buffer, size_t length );
+void gnw_emitDataPacket( int fd, unsigned char * buffer, ssize_t length );
+void gnw_emitCommandPacket( int fd, uint8_t type, unsigned char * buffer, ssize_t length );
 
 void gnw_sendCommand( int fd, uint8_t command );
 

@@ -30,9 +30,6 @@
 #include "lib/GraphNetwork.h"
 #include "lib/Assert.h"
 
-#define MAX_BUFFER_SIZE   512
-#define MAX_INPUT_BUFFER  256
-
 #define LOG_NAME "GraphWrap"
 
 #define PIPE_READ(PIPE) PIPE[0]
@@ -44,13 +41,17 @@
 extern char **environ;
 
 // Configurable Options //
-uint16_t     arg_router_port  = 19000;
-unsigned int arg_read_timeout = 5;
-bool         arg_daemonize    = false;
-uint64_t     graph_address    = 0;
+struct _configuration {
+    int network_mtu;                // default = 1500
+    uint16_t     router_port;   // default = 19000
+    unsigned int read_timeout;  // default = 5
+    bool         daemonize;     // default = false
+    uint64_t     graph_address;     // default = 0
 
-bool mode_input = false;
-bool mode_output = false;
+    bool mode_input;                // default = false
+    bool mode_output;               // default = false
+};
+struct _configuration config;
 
 pid_t childPID = -1;
 
@@ -83,7 +84,7 @@ void sigint_handler( int signum ) {
 }
 
 void fail( const char * err ) {
-    if( arg_daemonize )
+    if( config.daemonize )
         syslog( LOG_ERR, "%s\n", err );
     else
         fprintf( stderr, "%s\n", err );
@@ -172,10 +173,26 @@ int routerConnect() {
     return sockfd;
 }
 
+/**
+ * Attempts to find a particular file from the available PATH environment variable along with
+ * the current working directory.
+ *
+ * If no PATH-prefixed path exists, the target will be filled with the original binary path.
+ *
+ * <b>Usage</b>
+ * <pre>
+ * char path[128] = { 0 };
+ * findRealPath( path, "binary_file" );
+ * </pre>
+ *
+ * @param target Character pointer to be filled with the path. Must be large enough to handle the result!
+ * @param binary The file to search for.
+ */
 void findRealPath( char * target, const char * binary ) {
     char pathBuffer[2048] = { 0 };
-    char * path = (char *)malloc( 2048 );
-    memcpy( path, getenv( "PATH" ), strlen(getenv( "PATH" )) );
+    size_t env_path_length = strlen( getenv( "PATH" ) );
+    char * path = (char *)malloc( env_path_length + 1 );
+    memcpy( path, getenv( "PATH" ), env_path_length );
 
     char * parent = strtok( path, ":" );
     while( parent != NULL ) {
@@ -196,12 +213,25 @@ void findRealPath( char * target, const char * binary ) {
     free( path );
 }
 
+/**
+ * Exec into a new process, binding the stdin and stdout pipes to the graph network.
+ *
+ * Should never return under normal operation, but may return '-1' if an error occurred
+ * during the setup phase. The error text will be reported on stderr for resident
+ * processes, or the syslog for daemon ones.
+ *
+ * @param wrap_stdin The file descriptor to use for this process' stdin stream
+ * @param wrap_stdout The file descriptor to use for this process' stdout stream
+ * @param cmd The executable to become when exec-ing
+ * @param argv Any arguments to pass to the new process
+ * @return -1 on an error, or never returns
+ */
 int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** argv ) {
     // Capture stdout to wrap_stdout
     dup2( wrap_stdin,  STDIN_FILENO  );
     dup2( wrap_stdout, STDOUT_FILENO );
 
-    if( arg_daemonize )
+    if( config.daemonize )
         syslog( LOG_INFO, "Process started\n" );
     else
         fprintf( stderr, "Process started\n" );
@@ -209,7 +239,7 @@ int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** ar
     int result = execve( cmd, argv, environ );
 
     if( result != 0 )
-        if( arg_daemonize )
+        if( config.daemonize )
             syslog( LOG_INFO, "Process terminated with error: %s\n", strerror(errno) );
         else
             fprintf( stderr, "Process terminated with error: %s\n", strerror(errno) );
@@ -218,6 +248,16 @@ int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** ar
 }
 
 int main(int argc, char ** argv ) {
+    // Configuration defaults
+    config.network_mtu      = 1500;
+    config.router_port  = 19000;
+    config.daemonize    = false;
+    config.read_timeout = 5;
+    config.graph_address    = 0;
+
+    config.mode_input       = false;
+    config.mode_output      = false;
+
     struct sigaction sa;
     sa.sa_handler = sigint_handler;
     sigemptyset( &sa.sa_mask );
@@ -227,35 +267,34 @@ int main(int argc, char ** argv ) {
     sigaction( SIGHUP, &sa, NULL );
     sigaction( SIGKILL, &sa, NULL );
 
-
     // Argument Parsing //
     char arg;
     while( (arg = getopt(argc, argv, "p:t:dio")) != -1 ) {
         switch( arg ) {
             case 'p':
-                arg_router_port = (uint16_t)strtoul( optarg, NULL, 10 );
+                config.router_port = (uint16_t)strtoul( optarg, NULL, 10 );
                 break;
 
             case 't':
-                arg_read_timeout = (unsigned int) strtoul( optarg, NULL, 10 );
+                config.read_timeout = (unsigned int) strtoul( optarg, NULL, 10 );
                 break;
 
             case 'd':
-                arg_daemonize = true;
+                config.daemonize = true;
                 break;
 
             case 'i': // Pipe input mode
                 printf( "Input mode\n" );
-                if( mode_output )
+                if( config.mode_output )
                     fail( "Cannot be both an input *and* an output node! STOP." );
-                mode_input = true;
+                config.mode_input = true;
                 break;
 
             case 'o': // Pipe output mode
                 printf( "Output mode\n" );
-                if( mode_input )
+                if( config.mode_input )
                     fail( "Cannot be both an input *and* an output node! STOP." );
-                mode_output = true;
+                config.mode_output = true;
                 break;
 
             case '?':
@@ -272,17 +311,17 @@ int main(int argc, char ** argv ) {
     if( data_fd < 0 )
         fail( "Unable to get a connection to the graph router. STOP." );
 
-    char iBuffer[MAX_INPUT_BUFFER] = { 0 };
-    RingBuffer_t * rx_buffer = ringbuffer_init( MAX_BUFFER_SIZE );
+    char iBuffer[config.network_mtu];
+    RingBuffer_t * rx_buffer = ringbuffer_init( config.network_mtu );
 
     gnw_sendCommand( data_fd, GNW_CMD_NEW_ADDRESS );
 
     int client_state = GNW_STATE_OPEN;
     while( client_state != GNW_STATE_RUN ) {
 
-        memset( iBuffer, 0, MAX_INPUT_BUFFER );
+        memset( iBuffer, 0, config.network_mtu );
 
-        ssize_t bytesRead = read( data_fd, iBuffer, MAX_INPUT_BUFFER );
+        ssize_t bytesRead = read( data_fd, iBuffer, config.network_mtu );
         if( bytesRead <= 0 ) {
             fprintf( stderr, "IO Error, halting!\n" );
             external_shutdown();
@@ -295,9 +334,9 @@ int main(int argc, char ** argv ) {
         if( gnw_nextHeader( rx_buffer, &header ) ) {
             switch ( client_state ) {
                 case GNW_STATE_OPEN:
-                    ringbuffer_read( rx_buffer, &graph_address, 8 );
+                    ringbuffer_read( rx_buffer, &config.graph_address, 8 );
 
-                    printf( "Address registered as %llu\n", graph_address );
+                    printf( "Address registered as %llu\n", config.graph_address );
 
                     client_state = GNW_STATE_RUN;
                     break;
@@ -307,11 +346,11 @@ int main(int argc, char ** argv ) {
 
     // Become a background daemon //
     // Probably should become a child of the resident router, but this will work for now... -John.
-    if( arg_daemonize ) {
-        printf( "%llu\n", graph_address );
+    if( config.daemonize ) {
+        printf( "%llu\n", config.graph_address );
         daemonize();
     } else {
-        printf( "Address = %llu\n", graph_address );
+        printf( "Address = %llu\n", config.graph_address );
     }
 
     // Get the pipes together
@@ -325,20 +364,20 @@ int main(int argc, char ** argv ) {
         fail( "Could not create wrapper for stdout" );
 
     // Are we in input mode?
-    if( mode_input ) {
+    if( config.mode_input ) {
         struct pollfd watch_fd[1];
         memset( watch_fd, 0, sizeof( struct pollfd ) );
 
         watch_fd[0].fd = STDIN_FILENO;
         watch_fd[0].events = POLLIN;
 
-        char buffer[64] = { 0 };
+        char buffer[config.network_mtu];
 
         int rv = 0;
         while( (rv = poll(watch_fd, 1, 0)) != -1 ) {
             if( rv > 0 ) {
-                memset( buffer, 0, 64 );
-                ssize_t readBytes = read( watch_fd[0].fd, buffer, 64 );
+                memset( buffer, 0, config.network_mtu );
+                ssize_t readBytes = read( watch_fd[0].fd, buffer, config.network_mtu );
 
                 //fprintf( stderr, "Read: %llu B\n", readBytes );
 
@@ -360,7 +399,7 @@ int main(int argc, char ** argv ) {
     }
 
     // Are we in output mode?
-    if( mode_output ) {
+    if( config.mode_output ) {
         struct pollfd watch_fd[1];
         memset( watch_fd, 0, sizeof( struct pollfd ) );
 
@@ -428,7 +467,7 @@ int main(int argc, char ** argv ) {
 
     int status = 0;
     while( status == 0 ) {
-        int rv = poll( watch_fd, 2, arg_read_timeout * 1000 );
+        int rv = poll( watch_fd, 2, config.read_timeout * 1000 );
 
         if( rv == -1 ) {        // Error state while poll'ing
             fprintf( stderr, "Error during poll cycle for input. Shutting down.\n" );
@@ -439,7 +478,7 @@ int main(int argc, char ** argv ) {
             int status = 0;
             int ret = waitpid( childPID, &status, WNOHANG );
             if( ret == -1 && WIFEXITED(status) ) {
-                if (arg_daemonize)
+                if (config.daemonize)
                     syslog(LOG_INFO, "Process terminated (exit code = %d)\n", WEXITSTATUS(status));
                 else
                     fprintf(stderr, "Process terminated (exit code = %d)\n", WEXITSTATUS(status));
@@ -492,7 +531,7 @@ int main(int argc, char ** argv ) {
     close( PIPE_WRITE(wrap_stdout) );
 
     // Close the syslog, if we opened a connection to it
-    if( arg_daemonize )
+    if( config.daemonize )
         closelog();
 
     return EXIT_SUCCESS;

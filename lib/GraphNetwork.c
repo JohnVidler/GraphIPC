@@ -27,7 +27,15 @@
 
 volatile gnw_stats_t link_stats;
 
-void gnw_format_address( char * buffer, uint64_t address ) {
+/**
+ * Puts a formatted graph address in the character buffer supplied.
+ *
+ * Buffer must have at least 24 characters remaining, no length checks are made.
+ *
+ * @param buffer The buffer to write in to
+ * @param address The 64-bit address to write
+ */
+void gnw_format_address( unsigned char * buffer, uint64_t address ) {
     uint8_t * tmp = (uint8_t *) &address;
     for( int i=7; i>-1; i-- ) {
         buffer = buffer + sprintf( buffer, "%02x", *(tmp+i) );
@@ -36,11 +44,24 @@ void gnw_format_address( char * buffer, uint64_t address ) {
     }
 }
 
-void gnw_dumpPacket( FILE * fd, char * buffer, ssize_t length ) {
+/**
+ * Dump a formatted packet to the file descriptor, identifying known fields.
+ *
+ * @param fd Which file descriptor to write to
+ * @param buffer A pointer to the first byte of the header to a packet
+ * @param length The length of the buffer to print.
+ */
+void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length ) {
     gnw_header_t * header = (gnw_header_t *)buffer;
-    char * payload = buffer + sizeof( gnw_header_t );
+
+    // Optionally use the header length
+    if( length == -1 )
+        length = header->length;
+
+    unsigned char * payload = buffer + sizeof( gnw_header_t );
     ssize_t payload_length = length - sizeof( gnw_header_t );
 
+    fprintf( fd, "Has correct magic? %s\n", ( header->magic == GNW_MAGIC ? "Yes" : "No" ) );
     fprintf( fd, "Version:\t%x\n", header->version );
     fprintf( fd, "Type:\t%x\t(" );
     switch( header->type ) {
@@ -61,14 +82,14 @@ void gnw_dumpPacket( FILE * fd, char * buffer, ssize_t length ) {
     }
 }
 
-void gnw_emitPacket( int fd, char * buffer, ssize_t length ) {
+void gnw_emitPacket( int fd, unsigned char * buffer, size_t length ) {
     ssize_t written = write( fd, buffer, length );
     link_stats.bytesWritten += written;
 }
 
-void gnw_emitDataPacket( int fd, char * buffer, ssize_t length ) {
+void gnw_emitDataPacket( int fd, unsigned char * buffer, ssize_t length ) {
     link_stats.dataPackets++;
-    char * packet = (char *)malloc( length + sizeof(gnw_header_t) );
+    unsigned char * packet = (unsigned char *)malloc( length + sizeof(gnw_header_t) );
     ((gnw_header_t *)packet)->magic    = GNW_MAGIC;
     ((gnw_header_t *)packet)->version  = GNW_VERSION;
     ((gnw_header_t *)packet)->type     = GNW_DATA;
@@ -82,9 +103,9 @@ void gnw_emitDataPacket( int fd, char * buffer, ssize_t length ) {
     free( packet );
 }
 
-void gnw_emitCommandPacket( int fd, uint8_t type, char * buffer, ssize_t length ) {
+void gnw_emitCommandPacket( int fd, uint8_t type, unsigned char * buffer, ssize_t length ) {
     link_stats.commandPackets++;
-    char * packet = (char *)malloc( length + sizeof(gnw_header_t) );
+    unsigned char * packet = (unsigned char *)malloc( length + sizeof(gnw_header_t) );
     ((gnw_header_t *)packet)->magic    = GNW_MAGIC;
     ((gnw_header_t *)packet)->version  = GNW_VERSION;
     ((gnw_header_t *)packet)->type     = type;
@@ -99,7 +120,7 @@ void gnw_emitCommandPacket( int fd, uint8_t type, char * buffer, ssize_t length 
 }
 
 void gnw_sendCommand( int fd, uint8_t command ) {
-    char buffer[1] = { command };
+    unsigned char buffer[1] = { command };
     gnw_emitCommandPacket( fd, GNW_COMMAND, buffer, 1 );
 }
 
@@ -108,8 +129,16 @@ bool gnw_nextHeader( RingBuffer_t * buffer, gnw_header_t * header ) {
 
     // Try to find a magic byte...
     uint8_t discard = 0;
-    while (ringbuffer_length(buffer) > 0 && ringbuffer_peek(buffer, 0) != GNW_MAGIC) {
-        ringbuffer_read(buffer, &discard, 1);
+    if(ringbuffer_length(buffer) > 0 && ringbuffer_peek(buffer, 0) != GNW_MAGIC) {
+        fprintf( stderr, "Stream lost sync! (Missed a network packet?) Data loss occurring...\n" );
+
+        unsigned int bytes_lost = 0;
+        while (ringbuffer_length(buffer) > 0 && ringbuffer_peek(buffer, 0) != GNW_MAGIC) {
+            ringbuffer_read(buffer, &discard, 1);
+            bytes_lost++;
+        }
+
+        fprintf( stderr, "Definitely lost %u bytes\n", bytes_lost );
     }
 
     // Bail if we can't fit an entire header into the remaining buffer

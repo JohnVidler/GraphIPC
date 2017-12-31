@@ -33,8 +33,8 @@ void ringbuffer_print( RingBuffer_t * root ) {
     printf( "\tLength:\t%llu\n", ringbuffer_capacity(root) );*/
 
     printf( "[" );
-    char * tmp = root->start;
-    while( tmp < (char *)root->end ) {
+    unsigned char * tmp = root->start;
+    while( tmp < (unsigned char *)root->end ) {
         if( *tmp < 32 || *tmp > 126 )
             printf( "_" );
         else
@@ -45,7 +45,7 @@ void ringbuffer_print( RingBuffer_t * root ) {
 
     printf( "[" );
     tmp = root->start;
-    while( tmp < (char *)root->end ) {
+    while( tmp < (unsigned char *)root->end ) {
         if( tmp == root->head && tmp == root->tail )
             printf( "X" );
         else if( tmp == root->head )
