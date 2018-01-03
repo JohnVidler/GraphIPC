@@ -104,7 +104,37 @@ size_t ringbuffer_length( RingBuffer_t *root ) {
     return (root->end - root->tail) + (root->head - root->start);
 }
 
-ssize_t ringbuffer_read( RingBuffer_t * root, void * buffer, ssize_t maxLength )
+ssize_t ringbuffer_peek_copy( RingBuffer_t * root, void * buffer, size_t maxLength ) {
+    sem_wait( &(root->lock) );
+
+    size_t readLength = minValue(ringbuffer_length(root), maxLength );
+
+    assert( readLength <= root->capacity, "Length overflow, attempted read was larger than the buffer ever was." );
+
+    if( readLength == 0 ) {
+        sem_post( &(root->lock) );
+        return 0;
+    }
+
+    if( readLength <= root->end - root->tail ) {
+
+        if( buffer != NULL )
+            memcpy( buffer, root->tail, readLength ); // Basic single copy
+
+        sem_post( &(root->lock) );
+        return readLength;
+    }
+
+    if( buffer != NULL ) {
+        memcpy(buffer, root->tail, root->end - root->tail);
+        memcpy(buffer + (root->end - root->tail), root->start, readLength - (root->end - root->tail));
+    }
+
+    sem_post( &(root->lock) );
+    return readLength;
+}
+
+ssize_t ringbuffer_read( RingBuffer_t * root, void * buffer, size_t maxLength )
 {
     sem_wait( &(root->lock) );
 
@@ -151,6 +181,44 @@ uint8_t ringbuffer_peek( RingBuffer_t * root, size_t offset ) {
         ref = root->start + ( root->tail + (offset % root->capacity) - root->end );
 
     uint8_t tmp = *(uint8_t *)(ref);
+    sem_post( &(root->lock) );
+    return tmp;
+}
+
+/**
+ * Peek a 16-bit unsigned int from the supplied <strong>byte offset</strong>
+ *
+ * @param root The RingBuffer structure to use
+ * @param offset The offset, in bytes
+ * @return The value at this offset
+ */
+uint16_t ringbuffer_peek16( RingBuffer_t * root, size_t offset ) {
+    sem_wait( &(root->lock) );
+
+    void * ref = root->tail + (offset % root->capacity);
+    if( ref > root->end )
+        ref = root->start + ( root->tail + (offset % root->capacity) - root->end );
+
+    uint16_t tmp = *(uint16_t *)(ref);
+    sem_post( &(root->lock) );
+    return tmp;
+}
+
+/**
+ * Peek a 32-bit unsigned int from the supplied <strong>byte offset</strong>
+ *
+ * @param root The RingBuffer structure to use
+ * @param offset The offset, in bytes
+ * @return The value at this offset
+ */
+uint32_t ringbuffer_peek32( RingBuffer_t * root, size_t offset ) {
+    sem_wait( &(root->lock) );
+
+    void * ref = root->tail + (offset % root->capacity);
+    if( ref > root->end )
+        ref = root->start + ( root->tail + (offset % root->capacity) - root->end );
+
+    uint32_t tmp = *(uint32_t *)(ref);
     sem_post( &(root->lock) );
     return tmp;
 }

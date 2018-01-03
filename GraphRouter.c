@@ -28,12 +28,12 @@
 #include "lib/RingBuffer.h"
 #include "lib/utility.h"
 #include <glib-2.0/glib.h>
-#include <getopt.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+#include <getopt.h>
 
 #define MAX_BUFFER_SIZE   4096
 #define MAX_INPUT_BUFFER  1024
@@ -46,7 +46,7 @@ struct _configuration {
 struct _configuration config;
 
 typedef struct client_context {
-    uint64_t address;
+    gnw_address_t address;
     pthread_t * thread_state;
     int socket_fd;
     RingBuffer_t * rx_buffer;
@@ -182,13 +182,16 @@ void * clientProcess( void * _context ) {
     client_context_t * context = (client_context_t *)_context;
     context->state = GNW_STATE_OPEN;
 
-    char clientAddress[20] = { 0 };
+    unsigned char clientAddress[20] = { 0 };
     gnw_format_address( clientAddress, context->address );
 
     printf( "%s\tState: OPEN\n", clientAddress );
 
     // Fire up our ring buffer
     context->rx_buffer = ringbuffer_init( config.network_mtu );
+
+    // Probably should be part of the thread context structure, but here for now...
+    gnw_state_t parser_context = { .state = 0 };
 
     printf( "Client poll loop running...\n" );
 
@@ -198,13 +201,11 @@ void * clientProcess( void * _context ) {
     watch_fd[0].fd = context->socket_fd;
     watch_fd[0].events = POLLIN;
 
-    char iBuffer[config.network_mtu];
+    unsigned char iBuffer[config.network_mtu];
 
     int logout_timeout = 10;
     ssize_t bytes = 1;
     while( bytes > 0 ) {
-        memset( iBuffer, 0, config.network_mtu );
-
         int rv = poll( watch_fd, 1, 1000 );
 
         // Wait error, drop back to callee
@@ -216,101 +217,63 @@ void * clientProcess( void * _context ) {
 
         // Timeout...
         if( rv == 0 ) {
-            printf( "State: %d\n", context->state );
+            printf( "Timeout (State: %d)\n", context->state );
             if( context->state == GNW_STATE_OPEN ) {
                 if (logout_timeout-- < 0) {
                     printf( "Client %s timed out, dropping them.\n", clientAddress );
                     context_cleanup( context );
                     return NULL;
                 }
+
+                gnw_emitCommandPacket( context->socket_fd, GNW_DATA, NULL, 0 ); // Poke the client with a null data packet
             }
 
             continue;
         }
+        logout_timeout = 10; // Timeout reset, we have data.
 
+        memset( iBuffer, 0, config.network_mtu ); // Here purely for sanity, remove for speeeeeed
         bytes = read( context->socket_fd, iBuffer, config.network_mtu );
-        context->bytes_in += bytes; // Update counters
+        if( ringbuffer_write( context->rx_buffer, iBuffer, bytes ) != bytes )
+            fprintf( stderr, "Buffer overflow! %d Bytes lost!\n", bytes );  // Hopefully this won't happen, as we more aggressively parse than fill the buffer
 
-        ssize_t written = 0;
-        while( written != bytes && written > 0 ) {
-            written = ringbuffer_write(context->rx_buffer, iBuffer, bytes);
+        // May as well re-use the input buffer, we've already copied the contents to the ring buffer
+        while( gnw_nextPacket( context->rx_buffer, &parser_context, iBuffer ) ) {
+            gnw_header_t * header = (gnw_header_t *)iBuffer;
+            unsigned char * payload = (unsigned char *)( iBuffer + sizeof(gnw_header_t) );
 
-            char * units;
-            printf( "Write: %ld\t(%ld)\n", written, context->bytes_in );
-
-            gnw_header_t header;
-            memset(&header, 0, sizeof(gnw_header_t));
-
-            //printf( "<<<\tPayload: %llu/%llu B\n", header.length, ringbuffer_capacity(context->rx_buffer) );
-            //ringbuffer_print( context->rx_buffer ); // Debug
-
-            while (gnw_nextHeader(context->rx_buffer, &header)) {
-
-                printf( "Header type: %d\n", header.type );
-
-                switch (context->state) {
-                    case GNW_STATE_OPEN: {
-
-                        void *payload = NULL;
-                        if (header.length > 0) {
-                            payload = malloc(
-                                    header.length); // Probably should move this to a static 'processing' buffer
-                            ringbuffer_read(context->rx_buffer, payload, header.length);
-                        }
-
-                        if (header.type == GNW_COMMAND) {
-                            if (payload == NULL) {
-                                printf("Bad command packet, skipping.\n");
-                                break;
-                            }
-
-                            // Address request
-                            if (*(uint8_t *) payload == GNW_CMD_NEW_ADDRESS) {
-                                printf("Client requested its address, sending.\n");
-                                gnw_emitCommandPacket(context->socket_fd, GNW_ACK, (char *) &(context->address), 8);
-
-                                context->state = GNW_STATE_RUN; // Move to the 'run' state
-                            }
-                        }
-
-                        // Free the payload, if there is one
-                        if (payload != NULL)
-                            free(payload);
-                    }
+            switch( header->type ) {
+                case GNW_COMMAND:
+                    if( header->length < 1 ) {
+                        fprintf( stderr, "%s\tClient sent a command with no operator, skipping.\n", clientAddress );
                         break;
-
-                    case GNW_STATE_RUN: {
-                        //printf( "Unimplemented State!\n" );
-
-                        void *payload = NULL;
-                        if (header.length > 0) {
-                            payload = malloc(
-                                    header.length); // Probably should move this to a static 'processing' buffer
-                            ringbuffer_read(context->rx_buffer, payload, header.length);
-                        }
-
-                        gnw_sendCommand(context->socket_fd, GNW_ACK);
-
-                        //printf( "<<<\t%s\n", (char *)payload );
-
-                        // Discard stuff :|
-
-                        //printf( "<<<\tPayload: %llu/%llu B\n", header.length, ringbuffer_capacity(context->rx_buffer) );
-
-                        if (payload != NULL)
-                            free(payload);
                     }
-                        break;
 
-                    default:
-                        fprintf(stderr, "Bad system state! Killing client process!\n");
-                        context_cleanup(context);
-                        return NULL;
-                }
+                    // Select based on the first byte -> The operator
+                    switch( *payload ) {
+                        case GNW_CMD_NEW_ADDRESS:
+                            fprintf( stdout, "%s\tAddress request.\n", clientAddress );
+
+                            unsigned char replyBuffer[ sizeof(gnw_address_t) + 1 ];
+                            replyBuffer[0] = GNW_CMD_NEW_ADDRESS;
+                            *((gnw_address_t *)(replyBuffer+1)) = context->address;
+                            gnw_emitCommandPacket( context->socket_fd, GNW_COMMAND | GNW_REPLY, replyBuffer, sizeof(gnw_address_t) );
+                            break;
+
+                        default:
+                            fprintf( stderr, "%s\tUnknown command, skipped.\n", clientAddress );
+                            break;
+                    }
+
+                    break;
+
+                default:
+                    fprintf( stderr, "%s\tBad response from client, skipping.\n", clientAddress );
+                    break;
             }
         }
 
-        //ringbuffer_print( context->rx_buffer );
+
     }
 
     printf( "%s\nState: CLOSE.\n", clientAddress );
@@ -423,7 +386,8 @@ int main(int argc, char ** argv ) {
 
     if( config.network_mtu == -1 ) {
         fprintf( stderr, "Unable to query the local interface MTU, defaulting to 4k\n" );
-        config.network_mtu = 4096;
+        //config.network_mtu = 4096;
+        config.network_mtu = 4096 * 20;
     }
 
     struct option longOptions[2] = { 0 };

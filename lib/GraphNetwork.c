@@ -67,8 +67,6 @@ void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length ) {
     switch( header->type ) {
         case GNW_COMMAND: fprintf( fd, "COMMAND" ); break;
         case GNW_DATA:    fprintf( fd, "DATA" );    break;
-        case GNW_ACK:     fprintf( fd, "ACK" );     break;
-        case GNW_NACK:    fprintf( fd, "NACK" );    break;
         case GNW_INVALID: fprintf( fd, "INVALID" ); break;
         default:
             fprintf( fd, "???" );
@@ -125,45 +123,57 @@ void gnw_sendCommand( int fd, uint8_t command ) {
 }
 
 
-bool gnw_nextHeader( RingBuffer_t * buffer, gnw_header_t * header ) {
+#define GNW_PARSE_SYNC   0
+#define GNW_PARSE_BUFFER 1
 
-    // Try to find a magic byte...
-    uint8_t discard = 0;
-    if(ringbuffer_length(buffer) > 0 && ringbuffer_peek(buffer, 0) != GNW_MAGIC) {
-        fprintf( stderr, "Stream lost sync! (Missed a network packet?) Data loss occurring...\n" );
+bool gnw_nextPacket( RingBuffer_t * buffer, gnw_state_t * context, void * packetBuffer ) {
+    unsigned char discard = 0;
+    gnw_header_t header;
 
-        unsigned int bytes_lost = 0;
-        while (ringbuffer_length(buffer) > 0 && ringbuffer_peek(buffer, 0) != GNW_MAGIC) {
-            ringbuffer_read(buffer, &discard, 1);
-            bytes_lost++;
-        }
+    switch( context->state ) {
+        case GNW_PARSE_SYNC:
+            while( ringbuffer_length(buffer) > 0 && ringbuffer_peek( buffer, 0 ) != GNW_MAGIC )
+                ringbuffer_read( buffer, &discard, 1 );
 
-        fprintf( stderr, "Definitely lost %u bytes\n", bytes_lost );
+            if( ringbuffer_peek(buffer, 0) == GNW_MAGIC )
+                context->state = GNW_PARSE_BUFFER;
+            break;
+
+        case GNW_PARSE_BUFFER:
+            // Can we grab a whole header?
+            if( ringbuffer_peek_copy( buffer, &header, sizeof(gnw_header_t) ) == sizeof(gnw_header_t) ) {
+
+                // Frame MAGIC ok?
+                if( header.magic != GNW_MAGIC ) {
+                    fprintf( stderr, "Missing packet framing, skipping!\n" );
+                    ringbuffer_read( buffer, &discard, 1 ); // Shift the ring by 1, hopefully becoming un-stuck
+                    context->state = GNW_PARSE_SYNC;
+                    break;
+                }
+
+                // Frame VERSION ok?
+                if( header.version != GNW_VERSION ) {
+                    fprintf( stderr, "GNW Version mismatch! Old software?\n" );
+                    ringbuffer_read( buffer, &discard, 1 ); // Shift the ring by 1, hopefully becoming un-stuck
+                    context->state = GNW_PARSE_SYNC;
+                    break;
+                }
+
+                // Do we have the complete packet yet?
+                if( ringbuffer_length( buffer ) >= header.length + sizeof(gnw_header_t) ) {
+                    if( ringbuffer_read( buffer, packetBuffer, header.length + sizeof(gnw_header_t) ) != header.length + sizeof(gnw_header_t) )
+                        fprintf( stderr, "Err! Could not pull the requested length data (%lu B) from the ring buffer, even though it had enough recorded!\n", header.length + sizeof(gnw_header_t) );
+
+                    return true;
+                }
+            }
+
+            break;
+
+        default:
+            fprintf( stderr, "ERR: GNW packet parser was in an unknown state, reset to SYNC state\n" );
+            context->state = GNW_PARSE_SYNC;
     }
 
-    // Bail if we can't fit an entire header into the remaining buffer
-    if (ringbuffer_length(buffer) < sizeof(gnw_header_t))
-        return false;
-
-    // Otherwise, check the header length field, check if its' sane
-    uint16_t packet_length = (uint16_t) ((((ringbuffer_peek(buffer, 2 ) << 8) & 0xFF00) | (ringbuffer_peek(buffer, 3 ) & 0xFF)) & 0xFFFF);
-
-    // If it fits, grab the header properly and return
-    if( packet_length <= ringbuffer_length(buffer) ) {
-        memset( header, 0, sizeof(gnw_header_t) );
-        ringbuffer_read( buffer, header, sizeof(gnw_header_t) );
-
-        return true;
-    }
-
-    if( ringbuffer_peek(buffer, 0) != GNW_MAGIC )
-        return false;
-
-    if(ringbuffer_length(buffer) < sizeof(gnw_header_t) )
-        return false;
-
-    memset( header, 0, sizeof(gnw_header_t) );
-    ringbuffer_read( buffer, header, sizeof(gnw_header_t) );
-
-    return true;
+    return false;
 }

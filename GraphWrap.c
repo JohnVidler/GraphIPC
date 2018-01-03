@@ -249,14 +249,14 @@ int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** ar
 
 int main(int argc, char ** argv ) {
     // Configuration defaults
-    config.network_mtu      = 1500;
-    config.router_port  = 19000;
-    config.daemonize    = false;
-    config.read_timeout = 5;
-    config.graph_address    = 0;
+    config.network_mtu   = 1500;
+    config.router_port   = 19000;
+    config.daemonize     = false;
+    config.read_timeout  = 5;
+    config.graph_address = 0;
 
-    config.mode_input       = false;
-    config.mode_output      = false;
+    config.mode_input    = false;
+    config.mode_output   = false;
 
     struct sigaction sa;
     sa.sa_handler = sigint_handler;
@@ -311,15 +311,18 @@ int main(int argc, char ** argv ) {
     if( data_fd < 0 )
         fail( "Unable to get a connection to the graph router. STOP." );
 
+    printf( "INFO\tUsing %d B MTU\n", config.network_mtu );
+
     char iBuffer[config.network_mtu];
+    gnw_state_t parser_context = { .state = 0 };
     RingBuffer_t * rx_buffer = ringbuffer_init( config.network_mtu );
 
-    gnw_sendCommand( data_fd, GNW_CMD_NEW_ADDRESS );
-
-    int client_state = GNW_STATE_OPEN;
-    while( client_state != GNW_STATE_RUN ) {
-
-        memset( iBuffer, 0, config.network_mtu );
+    // While we haven't been assigned an address, keep listening.
+    // Note - for future versions, this means that the address should be the
+    // last parameter sent to the client, unless the protocol changes vastly. -John.
+    while( config.graph_address == 0 ) {
+        // Ask for an address
+        gnw_sendCommand( data_fd, GNW_CMD_NEW_ADDRESS );
 
         ssize_t bytesRead = read( data_fd, iBuffer, config.network_mtu );
         if( bytesRead <= 0 ) {
@@ -330,27 +333,50 @@ int main(int argc, char ** argv ) {
         if( ringbuffer_write( rx_buffer, iBuffer, bytesRead ) != bytesRead )
             fprintf( stderr, "Buffer overflow! Data loss occurred!" );
 
-        gnw_header_t header;
-        if( gnw_nextHeader( rx_buffer, &header ) ) {
-            switch ( client_state ) {
-                case GNW_STATE_OPEN:
-                    ringbuffer_read( rx_buffer, &config.graph_address, 8 );
+        while( gnw_nextPacket( rx_buffer, &parser_context, iBuffer ) ) {
+            gnw_header_t * header = (gnw_header_t *)iBuffer;
+            unsigned char * payload = (unsigned char *)( iBuffer + sizeof(gnw_header_t) );
 
-                    printf( "Address registered as %llu\n", config.graph_address );
+            if( header->version != GNW_VERSION )
+                fprintf( stderr, "Warning! Router/Client version mismatch!\n" );
 
-                    client_state = GNW_STATE_RUN;
+            switch( header->type ) {
+                case GNW_COMMAND | GNW_REPLY: // Command response
+                    if( header->length < 1 ) {
+                        fprintf( stderr, "Router sent a command with no operator, no idea what to do!\n" );
+                        break;
+                    }
+
+                    switch( *payload ) {
+                        case GNW_CMD_NEW_ADDRESS:
+                            if( config.graph_address == 0 ) {
+                                config.graph_address = *((gnw_address_t *) (payload + 1));
+                                printf("Address = %u\n", config.graph_address);
+                            }
+                            break;
+
+                        default:
+                            fprintf( stderr, "Unknown command response?\n" );
+                            break;
+                    }
+
                     break;
+
+                default:
+                    fprintf( stderr, "Unknown response from router, skipping. (%x)\n", header->type );
             }
         }
     }
 
+    printf( "Address is %llx\n", config.graph_address );
+
     // Become a background daemon //
     // Probably should become a child of the resident router, but this will work for now... -John.
     if( config.daemonize ) {
-        printf( "%llu\n", config.graph_address );
+        printf( "%lx\n", config.graph_address );
         daemonize();
     } else {
-        printf( "Address = %llu\n", config.graph_address );
+        printf( "Address = %llx\n", config.graph_address );
     }
 
     // Get the pipes together
@@ -388,7 +414,7 @@ int main(int argc, char ** argv ) {
 
                 gnw_emitDataPacket( data_fd, buffer, readBytes );
 
-                usleep( 100 );
+                //usleep( 100 );
             }
         }
 

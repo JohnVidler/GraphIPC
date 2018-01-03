@@ -67,41 +67,35 @@ void test_ring_buffer() {
     return;
 }
 
-void debugState( char * file, int line ) {
-    //
-    printf( "State debug\n" );
-}
-
 void test_network_sync() {
     RingBuffer_t * rx_buffer = ringbuffer_init( 512 );
 
-    for( int i=0; i<2000; i++ ) {
-        unsigned char packet[sizeof( gnw_header_t ) + 10] = { 0 };
-        gnw_header_t * packer_header = (gnw_header_t *)packet;
-        packer_header->magic = GNW_MAGIC;
-        packer_header->length = 10;
-        packer_header->type = i;
-        packer_header->version = GNW_VERSION;
-        *(char *)(packet + sizeof(gnw_header_t)) = (char)(0x01 << (i%8));
+    unsigned int next = 0;
+    gnw_state_t context = { .state=0 };
 
-        ringbuffer_write( rx_buffer, packet, sizeof( gnw_header_t ) + 10 );
+    for( int i=0; i<200000; i++ ) {
+        unsigned char packet[sizeof(gnw_header_t) + 10] = {0};
+        do {
+            gnw_header_t *packer_header = (gnw_header_t *) packet;
+            packer_header->magic = GNW_MAGIC;
+            packer_header->length = 10;
+            packer_header->type = next;
+            packer_header->version = GNW_VERSION;
+            *(char *) (packet + sizeof(gnw_header_t)) = (unsigned char) (next++);
 
-        // Try and find a header
-        gnw_header_t header;
-        if( gnw_nextHeader( rx_buffer, &header ) ) {
-            // Will this packet physically fit in the remaining buffer?
-            if( header.length <= ringbuffer_length( rx_buffer ) ) {
+        } while( ringbuffer_write(rx_buffer, packet, sizeof(gnw_header_t) + 10) == sizeof(gnw_header_t) + 10 );
 
-                // Use a static array for a fast internal packet buffer
-                unsigned char latch_buffer[ 1024 ];
-                memset( &latch_buffer, 0, 1024 );
-                assert( ringbuffer_read( rx_buffer, &latch_buffer, header.length ) == header.length, "Couldn't pull the payload from the ring buffer" );
+        unsigned char inPacket[sizeof(gnw_header_t) + 30] = { 0 };
 
-                printf( "%02x -> %02x ? %02x -> %d\n", header.type, latch_buffer[0], 0x01 << (header.type % 8), (unsigned)latch_buffer[0] == (unsigned)0x01 << (header.type % 8) );
-
-                assert( 0x01 << (header.type % 8) == latch_buffer[0], "Payload did not match the expected value" );
-            }
+        // Try and read a packet!
+        while( gnw_nextPacket( rx_buffer, &context, &inPacket ) ) {
+            gnw_header_t * hdr = (gnw_header_t *)inPacket;
+            assert( hdr->magic == GNW_MAGIC, "Bad packet magic" );
+            assert( hdr->version == GNW_VERSION, "Bad packet version" );
+            assert( hdr->length == 10, "Bad packet length" );
+            assert( hdr->type == *(inPacket + sizeof(gnw_header_t)), "Type/Content mismatch" );
         }
+
     }
 
     ringbuffer_destroy( rx_buffer );

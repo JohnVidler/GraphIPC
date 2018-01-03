@@ -25,12 +25,13 @@
 
 #define GNW_MAGIC 0x55
 
-// Max 4-bit number! 0x0->0xF
+// Max 8-bit number! 0x00->0xFF
 #define GNW_INVALID  0x0
-#define GNW_DATA     0x1
-#define GNW_ACK      0x2
-#define GNW_NACK     0x3
-#define GNW_COMMAND  0xF
+#define GNW_DATA     0x10
+#define GNW_COMMAND  0xF0
+
+// OR'd for reply versions of the above
+#define GNW_REPLY    0x01
 
 // Used for wait commands that can accept any packet type
 #define GNW_ANY      0
@@ -41,7 +42,7 @@
 #define GNW_STATE_CLOSE   0xFE
 #define GNW_STATE_ZOMBIE  0xFF
 
-// Valid commands
+// Valid command operators
 #define GNW_CMD_NEW_ADDRESS  1
 
 // Link Constants
@@ -54,11 +55,11 @@
 // Router configuration
 #define ROUTER_BACKLOG 10
 #define ROUTER_PORT    (const char *)("19000")
-#define CONTROL_PORT   (const char *)("19001")
 
 // The router itself is uid == 0, so no process can ever be this UID.
 #define UID_INVALID 0
 
+typedef uint64_t gnw_address_t;
 typedef uint32_t UID_t;
 
 typedef struct {
@@ -69,11 +70,16 @@ typedef struct {
 } gnw_stats_t;
 
 typedef struct {
+    int state;
+} gnw_state_t;
+
+/** GNW Packet header structure */
+typedef struct {
     unsigned int magic   : 8;
-    unsigned int version : 4;
-    unsigned int type    : 4;
-    unsigned int length  : 16;
-} __attribute__((packed, aligned(8))) gnw_header_t;
+    unsigned int version : 8;
+    unsigned int type    : 8;
+    unsigned int length  : 32;
+} gnw_header_t;
 
 void gnw_format_address( unsigned char * buffer, uint64_t address );
 
@@ -85,4 +91,4 @@ void gnw_emitCommandPacket( int fd, uint8_t type, unsigned char * buffer, ssize_
 
 void gnw_sendCommand( int fd, uint8_t command );
 
-bool gnw_nextHeader( RingBuffer_t * buffer, gnw_header_t * header );
+bool gnw_nextPacket( RingBuffer_t * buffer, gnw_state_t * context, void * packetBuffer );

@@ -40,7 +40,19 @@ size_t ringbuffer_capacity(RingBuffer_t *root);
 size_t ringbuffer_length( RingBuffer_t *root );
 
 uint8_t ringbuffer_peek( RingBuffer_t * root, size_t offset );
+uint16_t ringbuffer_peek16( RingBuffer_t * root, size_t offset );
+uint32_t ringbuffer_peek32( RingBuffer_t * root, size_t offset );
 
-ssize_t ringbuffer_read( RingBuffer_t * root, void * buffer, ssize_t maxLength );
+/**
+ * Performs the same operations as ringbuffer_read, except does not move the read cursor
+ *
+ * @param root The ringbuffer structure to use
+ * @param buffer A pointer to a preallocated area of memory to copy to
+ * @param maxLength The maximum read length requested (may be less)
+ * @return The number of bytes actually copied, or -1 if in an error state
+ */
+ssize_t ringbuffer_peek_copy( RingBuffer_t * root, void * buffer, size_t maxLength );
+
+ssize_t ringbuffer_read( RingBuffer_t * root, void * buffer, size_t maxLength );
 
 ssize_t ringbuffer_write( RingBuffer_t * root, void * buffer, size_t length );
