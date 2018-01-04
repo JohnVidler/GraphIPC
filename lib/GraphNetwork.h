@@ -44,6 +44,10 @@
 
 // Valid command operators
 #define GNW_CMD_NEW_ADDRESS  1
+#define GNW_CMD_STATUS       2
+#define GNW_CMD_POLICY       3
+#define GNW_CMD_CONNECT      4
+#define GNW_CMD_DISCONNECT   5
 
 // Link Constants
 #define GNW_BROADCAST  0
@@ -75,10 +79,10 @@ typedef struct {
 
 /** GNW Packet header structure */
 typedef struct {
-    unsigned int magic   : 8;
-    unsigned int version : 8;
-    unsigned int type    : 8;
-    unsigned int length  : 32;
+    uint8_t  magic;
+    uint8_t  version;
+    uint8_t  type;
+    uint32_t length;
 } gnw_header_t;
 
 void gnw_format_address( unsigned char * buffer, uint64_t address );
@@ -90,5 +94,7 @@ void gnw_emitDataPacket( int fd, unsigned char * buffer, ssize_t length );
 void gnw_emitCommandPacket( int fd, uint8_t type, unsigned char * buffer, ssize_t length );
 
 void gnw_sendCommand( int fd, uint8_t command );
+
+void gnw_request_connect( int fd, gnw_address_t _source, gnw_address_t _target );
 
 bool gnw_nextPacket( RingBuffer_t * buffer, gnw_state_t * context, void * packetBuffer );

@@ -29,6 +29,7 @@
 #include <poll.h>
 #include "lib/GraphNetwork.h"
 #include "lib/Assert.h"
+#include "common.h"
 
 #define LOG_NAME "GraphWrap"
 
@@ -42,11 +43,13 @@ extern char **environ;
 
 // Configurable Options //
 struct _configuration {
-    int network_mtu;                // default = 1500
-    uint16_t     router_port;   // default = 19000
-    unsigned int read_timeout;  // default = 5
-    bool         daemonize;     // default = false
-    uint64_t     graph_address;     // default = 0
+    int           network_mtu;                // default = 1500
+    uint16_t      router_port;   // default = 19000
+    unsigned int  read_timeout;  // default = 5
+    bool          daemonize;     // default = false
+    gnw_address_t graph_address;     // default = 0
+    gnw_address_t link_upstream;
+    gnw_address_t link_downstream;
 
     bool mode_input;                // default = false
     bool mode_output;               // default = false
@@ -133,46 +136,6 @@ void daemonize() {
     openlog( LOG_NAME, LOG_PID, LOG_DAEMON );
 }
 
-// Process and Network Connections //
-int routerConnect() {
-    struct addrinfo hints;
-    struct addrinfo *clientinfo;
-    int retval;
-
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    // Hard coded loopback, for now... -John
-    if ((retval = getaddrinfo("127.0.0.1", ROUTER_PORT, &hints, &clientinfo)) != 0)
-        fail( "Unable to get a valid local socket to use... no more FDs available?" );
-
-    // loop through all the results and connect to the first we can
-    int sockfd = -1;
-    struct addrinfo *p;
-    for(p = clientinfo; p != NULL; p = p->ai_next) {
-        if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-            perror("client: socket");
-            continue;
-        }
-
-        if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-            close(sockfd);
-            perror("client: connect");
-            continue;
-        }
-
-        break;
-    }
-
-    if (p == NULL)
-        fail( "Unable to connect to the graph router... is one running?" );
-
-    freeaddrinfo(clientinfo); // all done with this structure
-
-    return sockfd;
-}
-
 /**
  * Attempts to find a particular file from the available PATH environment variable along with
  * the current working directory.
@@ -249,11 +212,13 @@ int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** ar
 
 int main(int argc, char ** argv ) {
     // Configuration defaults
-    config.network_mtu   = 1500;
-    config.router_port   = 19000;
-    config.daemonize     = false;
-    config.read_timeout  = 5;
-    config.graph_address = 0;
+    config.network_mtu     = 1500;
+    config.router_port     = 19000;
+    config.daemonize       = false;
+    config.read_timeout    = 5;
+    config.graph_address   = 0;
+    config.link_upstream   = 0; // Inherently invalid
+    config.link_downstream = 0; // Inherently invalid
 
     config.mode_input    = false;
     config.mode_output   = false;
@@ -269,8 +234,16 @@ int main(int argc, char ** argv ) {
 
     // Argument Parsing //
     char arg;
-    while( (arg = getopt(argc, argv, "p:t:dio")) != -1 ) {
+    while( (arg = getopt(argc, argv, "u:d:p:t:bio")) != -1 ) {
         switch( arg ) {
+            case 'u':
+                config.link_upstream = (gnw_address_t)strtoul( optarg, NULL, 16 );
+                break;
+
+            case 'd':
+                config.link_downstream = (gnw_address_t)strtoul( optarg, NULL, 16 );
+                break;
+
             case 'p':
                 config.router_port = (uint16_t)strtoul( optarg, NULL, 10 );
                 break;
@@ -279,7 +252,7 @@ int main(int argc, char ** argv ) {
                 config.read_timeout = (unsigned int) strtoul( optarg, NULL, 10 );
                 break;
 
-            case 'd':
+            case 'b':
                 config.daemonize = true;
                 break;
 
@@ -307,7 +280,7 @@ int main(int argc, char ** argv ) {
     }
 
     // Connect to the local router.
-    int data_fd = routerConnect();
+    int data_fd = socket_connect("127.0.0.1", ROUTER_PORT);
     if( data_fd < 0 )
         fail( "Unable to get a connection to the graph router. STOP." );
 
@@ -315,7 +288,7 @@ int main(int argc, char ** argv ) {
 
     char iBuffer[config.network_mtu];
     gnw_state_t parser_context = { .state = 0 };
-    RingBuffer_t * rx_buffer = ringbuffer_init( config.network_mtu );
+    RingBuffer_t * rx_buffer = ringbuffer_init( config.network_mtu * 20 ); // 20 packets...ish...
 
     // While we haven't been assigned an address, keep listening.
     // Note - for future versions, this means that the address should be the
@@ -351,7 +324,8 @@ int main(int argc, char ** argv ) {
                         case GNW_CMD_NEW_ADDRESS:
                             if( config.graph_address == 0 ) {
                                 config.graph_address = *((gnw_address_t *) (payload + 1));
-                                printf("Address = %u\n", config.graph_address);
+
+                                config.graph_address = 0xFFFFFFFF & config.graph_address;
                             }
                             break;
 
@@ -368,15 +342,13 @@ int main(int argc, char ** argv ) {
         }
     }
 
-    printf( "Address is %llx\n", config.graph_address );
-
     // Become a background daemon //
     // Probably should become a child of the resident router, but this will work for now... -John.
     if( config.daemonize ) {
         printf( "%lx\n", config.graph_address );
         daemonize();
     } else {
-        printf( "Address = %llx\n", config.graph_address );
+        printf( "Address = %lx\n", config.graph_address );
     }
 
     // Get the pipes together
@@ -389,8 +361,15 @@ int main(int argc, char ** argv ) {
     if( pipe( wrap_stdout ) == -1 )
         fail( "Could not create wrapper for stdout" );
 
+    // Magic autoconnecting! :)
+    if( config.link_downstream != 0 )
+        gnw_request_connect( data_fd, config.graph_address, config.link_downstream );
+    if( config.link_upstream != 0 )
+        gnw_request_connect( data_fd, config.link_upstream, config.graph_address );
+
     // Are we in input mode?
     if( config.mode_input ) {
+
         struct pollfd watch_fd[1];
         memset( watch_fd, 0, sizeof( struct pollfd ) );
 
@@ -405,16 +384,12 @@ int main(int argc, char ** argv ) {
                 memset( buffer, 0, config.network_mtu );
                 ssize_t readBytes = read( watch_fd[0].fd, buffer, config.network_mtu );
 
-                //fprintf( stderr, "Read: %llu B\n", readBytes );
-
                 if( readBytes == 0 ) {
                     fprintf( stderr, "Input shut down, stopping." );
                     break;
                 }
 
                 gnw_emitDataPacket( data_fd, buffer, readBytes );
-
-                //usleep( 100 );
             }
         }
 
@@ -432,25 +407,36 @@ int main(int argc, char ** argv ) {
         watch_fd[0].fd = data_fd;
         watch_fd[0].events = POLLIN;
 
-        char buffer[4096] = { 0 };
+        char buffer[config.network_mtu];
 
         int rv = 0;
         while( (rv = poll(watch_fd, 1, 0)) != -1 ) {
             if( rv > 0 ) {
-                memset( buffer, 0, 4096 );
-                ssize_t readBytes = read( watch_fd[0].fd, buffer, 4096 );
-
-                if( readBytes == 0 ) {
-                    fprintf( stderr, "NULL read, lost connection to router?\n" );
-                    break;
+                ssize_t bytesRead = read( data_fd, buffer, config.network_mtu );
+                if( bytesRead <= 0 ) {
+                    fprintf( stderr, "IO Error, halting!\n" );
+                    external_shutdown();
+                    return EXIT_FAILURE;
                 }
+                if( ringbuffer_write( rx_buffer, buffer, bytesRead ) != bytesRead )
+                    fprintf( stderr, "Buffer overflow! Data loss occurred!" );
 
-                char * payload = buffer + sizeof( gnw_header_t );
-                ssize_t writeBytes = write( STDOUT_FILENO, payload, readBytes - sizeof(gnw_header_t) );
+                while( gnw_nextPacket( rx_buffer, &parser_context, buffer ) ) {
+                    gnw_header_t *header = (gnw_header_t *) buffer;
+                    unsigned char *payload = (unsigned char *) (buffer + sizeof(gnw_header_t));
+                    *(payload + header->length) = '\0'; // Kludge?
 
-                fprintf( stderr, "Wrote: (%llu) %llu B\n", readBytes - sizeof(gnw_header_t), writeBytes );
+                    if (header->version != GNW_VERSION)
+                        fprintf(stderr, "Warning! Router/Client version mismatch!\n");
 
-                assert( readBytes - sizeof(gnw_header_t) == writeBytes, "Could not push all received bytes to the terminal. Data has been lost." );
+                    if( header->type != GNW_DATA )
+                        fprintf( stderr, "Warning! Router is emitting non-data packets in data mode!\n" );
+
+                    if( header->type == GNW_DATA ) {
+                        fprintf( stdout, "%s", payload );
+                        fflush( stdout );
+                    }
+                }
             }
         }
 
@@ -536,6 +522,8 @@ int main(int argc, char ** argv ) {
                     ssize_t length = bytesRead - sizeof( gnw_header_t );
                     char * payload = buffer + sizeof( gnw_header_t );
                     assert( header->type == GNW_DATA, "Non-Data packet?" );
+
+                    *(payload + header->length) = '\0'; // Zero the end of the buffer
 
                     ssize_t bytesWritten = write( PIPE_WRITE(wrap_stdin), payload, length );
                     assert( length == bytesWritten, "Could not push all data to the wrapped process!" );

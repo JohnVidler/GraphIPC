@@ -23,17 +23,17 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <pthread.h>
-#include <assert.h>
 #include "lib/GraphNetwork.h"
-#include "lib/RingBuffer.h"
 #include "lib/utility.h"
-#include <glib-2.0/glib.h>
-#include <sys/stat.h>
-#include <fcntl.h>
+#include "lib/Assert.h"
+#include "common.h"
+#include "lib/LinkedList.h"
 #include <poll.h>
-#include <sys/ioctl.h>
-#include <net/if.h>
+#include <sys/un.h>
 #include <getopt.h>
+
+#define SYSTEM_ACTIVE 1
+#define SYSTEM_STOP   0
 
 #define MAX_BUFFER_SIZE   4096
 #define MAX_INPUT_BUFFER  1024
@@ -41,9 +41,10 @@
 
 struct _configuration {
     int network_mtu;
+    int system_state;
 };
 
-struct _configuration config;
+volatile struct _configuration config;
 
 typedef struct client_context {
     gnw_address_t address;
@@ -59,7 +60,7 @@ typedef struct client_context {
     int roundrobin_index;
 } client_context_t;
 
-GList * client_list = NULL;
+linked_list_t * client_list = NULL;
 pthread_mutex_t client_list_mutex;
 
 volatile uint64_t nextAddress = 1;
@@ -108,11 +109,11 @@ int getListenSocket( struct addrinfo * hints ) {
 void emitStatistics( FILE * stream ) {
     fprintf( stream, "UID\tState\tIn\tOut\tPolicy\t\tLinks\n" );
     pthread_mutex_lock( &client_list_mutex );
-    GList * iter = client_list;
-    while( iter != NULL ) {
+
+    struct list_element *iter;
+    for (iter = client_list->head; iter != NULL; iter = iter->next) {
         client_context_t * context = (client_context_t *)iter->data;
 
-        // Just hide zombie processes for now - this should be cleaned up properly at some point...
         if( context->state != GNW_STATE_ZOMBIE ) {
             char state_str[32] = {0};
             switch (context->state) {
@@ -124,6 +125,9 @@ void emitStatistics( FILE * stream ) {
                     break;
                 case GNW_STATE_CLOSE:
                     sprintf(state_str, "CLOSE");
+                    break;
+                case GNW_STATE_ZOMBIE:
+                    sprintf(state_str, "ZOMBIE");
                     break;
                 default:
                     sprintf(state_str, "???");
@@ -144,30 +148,49 @@ void emitStatistics( FILE * stream ) {
                     sprintf(policy_str, "???");
             }
 
-            char * ref = NULL;
-            fmt_humanSize( context->bytes_out, ref );
+            char *ref = NULL;
+            fmt_humanSize(context->bytes_out, ref);
 
-            fprintf( stream, "%llx\t%s\t%lluB\t%lluB\t%s\t{ ",
-                     (unsigned long long int) context->address,
-                     state_str,
-                     (unsigned long long int) context->bytes_in,
-                     (unsigned long long int) context->bytes_out,
-                     policy_str);
+            fprintf(stream, "%lx\t%s\t%luB\t%luB\t%s\t{ ",
+                    context->address,
+                    state_str,
+                    context->bytes_in,
+                    context->bytes_out,
+                    policy_str);
 
             for (int i = 0; i < GNW_MAX_LINKS; i++) {
                 if (context->links[i] != NULL)
-                    fprintf( stream, "%llu ", context->links[i]->address );
+                    fprintf(stream, "%lu ", context->links[i]->address);
             }
-            fprintf( stream, "}\n" );
-
-            if (context->state == GNW_STATE_CLOSE)
-                context->state = GNW_STATE_ZOMBIE;
+            fprintf(stream, "}\n");
         }
-
-        iter = iter->next;
     }
     pthread_mutex_unlock( &client_list_mutex );
     fprintf( stream, "\n" );
+}
+
+client_context_t * findByAddress( gnw_address_t address ) {
+    pthread_mutex_lock(&client_list_mutex);
+    bool done = false;
+    struct list_element *iter = client_list->head;
+    while (iter != NULL && !done) {
+        client_context_t *context = (client_context_t *) iter->data;
+
+        if (context->address == address) {
+            done = true;
+            break;
+        }
+        iter = iter->next;
+    }
+    if( iter == NULL ) {
+        pthread_mutex_unlock(&client_list_mutex);
+        return NULL;
+    }
+
+    client_context_t * data_ptr = iter->data;
+    pthread_mutex_unlock(&client_list_mutex);
+
+    return data_ptr;
 }
 
 void context_cleanup( client_context_t * context ) {
@@ -175,7 +198,8 @@ void context_cleanup( client_context_t * context ) {
     close( context->socket_fd );
     ringbuffer_destroy( context->rx_buffer );
 
-    free( context );
+    // Become zombie, ask to be cleaned up.
+    context->state = GNW_STATE_ZOMBIE;
 }
 
 void * clientProcess( void * _context ) {
@@ -188,7 +212,7 @@ void * clientProcess( void * _context ) {
     printf( "%s\tState: OPEN\n", clientAddress );
 
     // Fire up our ring buffer
-    context->rx_buffer = ringbuffer_init( config.network_mtu );
+    context->rx_buffer = ringbuffer_init( config.network_mtu * 20 ); // 20 packets of MTU-size
 
     // Probably should be part of the thread context structure, but here for now...
     gnw_state_t parser_context = { .state = 0 };
@@ -201,12 +225,15 @@ void * clientProcess( void * _context ) {
     watch_fd[0].fd = context->socket_fd;
     watch_fd[0].events = POLLIN;
 
+    unsigned char latchBuffer[config.network_mtu];
     unsigned char iBuffer[config.network_mtu];
 
+    bool read_back_off = false;
+    int tick_rate = 1000;
     int logout_timeout = 10;
     ssize_t bytes = 1;
     while( bytes > 0 ) {
-        int rv = poll( watch_fd, 1, 1000 );
+        int rv = poll( watch_fd, 1, tick_rate );
 
         // Wait error, drop back to callee
         if( rv == -1 ) {
@@ -217,10 +244,10 @@ void * clientProcess( void * _context ) {
 
         // Timeout...
         if( rv == 0 ) {
-            printf( "Timeout (State: %d)\n", context->state );
+            fprintf( stdout, "%s\tTick (State: %d)\n", clientAddress, context->state );
             if( context->state == GNW_STATE_OPEN ) {
                 if (logout_timeout-- < 0) {
-                    printf( "Client %s timed out, dropping them.\n", clientAddress );
+                    fprintf( stdout, "Client %s timed out, dropping them.\n", clientAddress );
                     context_cleanup( context );
                     return NULL;
                 }
@@ -232,25 +259,56 @@ void * clientProcess( void * _context ) {
         }
         logout_timeout = 10; // Timeout reset, we have data.
 
-        memset( iBuffer, 0, config.network_mtu ); // Here purely for sanity, remove for speeeeeed
-        bytes = read( context->socket_fd, iBuffer, config.network_mtu );
-        if( ringbuffer_write( context->rx_buffer, iBuffer, bytes ) != bytes )
-            fprintf( stderr, "Buffer overflow! %d Bytes lost!\n", bytes );  // Hopefully this won't happen, as we more aggressively parse than fill the buffer
+        // Only read if we're not backing off, otherwise we'll trash the buffer
+        if( read_back_off == false ) {
+            memset( latchBuffer, 0, config.network_mtu ); // Here purely for sanity, remove for speeeeeed
+            bytes = read(context->socket_fd, latchBuffer, config.network_mtu);
+            context->bytes_in += bytes;
+        }
 
-        // May as well re-use the input buffer, we've already copied the contents to the ring buffer
+        // Attempt (or re-attempt) to push to the ring, backing off as required.
+        if( ringbuffer_write( context->rx_buffer, latchBuffer, bytes ) != bytes ) {
+            fprintf(stderr, "Buffer overflow! Read backoff enabled, trying to drain the buffer...\n" );
+            read_back_off = true;
+        } else {
+            read_back_off = false;
+        }
+
         while( gnw_nextPacket( context->rx_buffer, &parser_context, iBuffer ) ) {
-            gnw_header_t * header = (gnw_header_t *)iBuffer;
-            unsigned char * payload = (unsigned char *)( iBuffer + sizeof(gnw_header_t) );
+            gnw_header_t *  packet_header  = (gnw_header_t *)iBuffer;
+            uint32_t        packet_length  = sizeof( gnw_header_t ) + packet_header->length;
+            unsigned char * packet_payload = (unsigned char *)( iBuffer + sizeof(gnw_header_t) );
 
-            switch( header->type ) {
+            switch( packet_header->type ) {
+                case GNW_DATA:
+
+                    switch( context->link_policy ) {
+                        case GNW_BROADCAST:
+                            for( int i=0; i<10; i++ ) {
+                                if( context->links[i] != NULL ) {
+                                    gnw_emitDataPacket(context->links[i]->socket_fd, packet_payload, packet_header->length);
+                                    context->bytes_out += packet_header->length;
+                                }
+                            }
+                            break;
+
+                        case GNW_ANYCAST:
+                            break;
+
+                        case GNW_ROUNDROBIN:
+                            break;
+                    }
+
+                    break;
+
                 case GNW_COMMAND:
-                    if( header->length < 1 ) {
+                    if( packet_header->length < 1 ) {
                         fprintf( stderr, "%s\tClient sent a command with no operator, skipping.\n", clientAddress );
                         break;
                     }
 
                     // Select based on the first byte -> The operator
-                    switch( *payload ) {
+                    switch( *packet_payload ) {
                         case GNW_CMD_NEW_ADDRESS:
                             fprintf( stdout, "%s\tAddress request.\n", clientAddress );
 
@@ -258,17 +316,84 @@ void * clientProcess( void * _context ) {
                             replyBuffer[0] = GNW_CMD_NEW_ADDRESS;
                             *((gnw_address_t *)(replyBuffer+1)) = context->address;
                             gnw_emitCommandPacket( context->socket_fd, GNW_COMMAND | GNW_REPLY, replyBuffer, sizeof(gnw_address_t) );
+
+                            // Going live (run state)
+                            context->state = GNW_STATE_RUN;
+                            fprintf( stdout, "%s\tClient going to RUN state, will not time out.\n", clientAddress );
+                            tick_rate = 10000; // Now tick at 10 second intervals, just so we don't spin unnecessarily
+                            break;
+
+                        case GNW_CMD_STATUS:
+                            fprintf( stdout, "%s\tStatus request.\n", clientAddress );
+
+                            emitStatistics( stdout );
+
+                            break;
+
+                        case GNW_CMD_POLICY: {
+                            fprintf(stdout, "%s\tNode policy change.\n", clientAddress);
+
+                            unsigned char newPolicy = *(packet_payload + 1);
+                            gnw_address_t target = *(gnw_address_t *) (packet_payload + 2);
+
+                            if( target < 1 ) {
+                                fprintf( stderr, "No endpoint can ever be address zero!\n" );
+                                break;
+                            }
+
+                            client_context_t * node = findByAddress( target );
+                            if( node == NULL ) {
+                                fprintf( stderr, "No such valid address -> %lx\n", target );
+                                break;
+                            }
+                            fprintf(stdout, "%lx policy changed from %d to %d\n", target, node->link_policy,
+                                    newPolicy);
+                            node->link_policy = newPolicy;
+
+                            break;
+                        }
+
+
+                        case GNW_CMD_CONNECT:
+                            fprintf( stdout, "%s\tNode connect request.\n", clientAddress );
+
+                            gnw_address_t source_address = *(gnw_address_t *)(packet_payload+1);
+                            gnw_address_t target_address = *(gnw_address_t *)(packet_payload+1+sizeof(gnw_address_t));
+
+                            fprintf( stdout, "%d -> %d\n", source_address, target_address );
+
+                            client_context_t * source = findByAddress( source_address );
+                            if( source == NULL ) {
+                                fprintf( stderr, "No such valid source address -> %lx\n", source_address );
+                                break;
+                            }
+
+                            client_context_t * target = findByAddress( target_address );
+                            if( target == NULL ) {
+                                fprintf( stderr, "No such valid target address -> %lx\n", target_address );
+                                break;
+                            }
+
+                            for( int i=0; i<10; i++ ) {
+                                if( source->links[i] == NULL ) {
+                                    source->links[i] = target;
+                                    break;
+                                }
+                            }
+
                             break;
 
                         default:
                             fprintf( stderr, "%s\tUnknown command, skipped.\n", clientAddress );
+                            gnw_dumpPacket( stdout, iBuffer, -1 );
                             break;
                     }
 
                     break;
 
                 default:
-                    fprintf( stderr, "%s\tBad response from client, skipping.\n", clientAddress );
+                    //fprintf( stderr, "%s\tBad response from client, skipping.\n", clientAddress );
+                    //gnw_dumpPacket( stdout, iBuffer, packet_length );
                     break;
             }
         }
@@ -278,42 +403,6 @@ void * clientProcess( void * _context ) {
 
     printf( "%s\nState: CLOSE.\n", clientAddress );
     context_cleanup( context );
-    return NULL;
-}
-
-void * commandProcess( void * none ) {
-    // Set up the command pipe
-    int cmd_fd;
-    mkfifo( COMMAND_PIPE_PATH, 0666 );
-    cmd_fd = open( COMMAND_PIPE_PATH, O_RDWR | O_CREAT ); // ToDo: Close the command pipe when the router is shut down!
-    FILE * cmd_file = fdopen( cmd_fd, "w+" );
-
-    printf( "Waiting for commands...\n" );
-    char buffer[1024] = { 0 };
-    while( 1 ) {
-        memset( buffer, 0, 1024 );
-        ssize_t bytesRead = read( cmd_fd, buffer, 1024 );
-
-        if( bytesRead == -1 )
-            break;
-
-        if( strncmp( buffer, "status", 6 ) == 0 ) {
-            printf( "Status request\n" );
-
-            emitStatistics( cmd_file );
-            fprintf( cmd_file, "EOL\n" );
-            fflush( cmd_file );
-        } else {
-            fprintf( cmd_file, "No such command. Did nothing.\n" );
-        }
-
-        emitStatistics( stdout );
-
-    }
-
-    printf( "Command process shut down, bye!\n" );
-    unlink( COMMAND_PIPE_PATH );
-
     return NULL;
 }
 
@@ -332,15 +421,14 @@ int router_process() {
 
     if( listen( listen_fd, ROUTER_BACKLOG ) == -1 ) {
         perror( "listen" );
-        exit( 1 );
+        exit( EXIT_FAILURE );
     }
 
+    // Set up the client list
+    client_list = ll_create();
     pthread_mutex_init( &client_list_mutex, NULL );
 
-    pthread_t command_context;
-    pthread_create( &command_context, NULL, commandProcess, NULL );
-
-    while( 1 ) {
+    while( config.system_state ) {
         struct sockaddr_storage remote_socket;
         socklen_t newSock_len = sizeof( socklen_t );
         int remote_fd = accept( listen_fd, (struct sockaddr *)&remote_socket, &newSock_len );
@@ -349,24 +437,49 @@ int router_process() {
             continue;
         }
 
-        client_context_t * new_context = (client_context_t *)malloc( sizeof(client_context_t) );
-        memset( new_context, 0, sizeof( client_context_t ) );
-        new_context->thread_state = (pthread_t *)malloc( sizeof(pthread_t) );
+        client_context_t *new_context = malloc(sizeof(client_context_t));
+        memset(new_context, 0, sizeof(client_context_t));
+        new_context->thread_state = malloc(sizeof(pthread_t));
         new_context->socket_fd = remote_fd;
         new_context->address = nextAddress++;
         new_context->link_policy = GNW_BROADCAST; // Default to broadcast
 
-        for( int i=0; i<GNW_MAX_LINKS; i++ )
+        for (int i = 0; i < GNW_MAX_LINKS; i++)
             new_context->links[i] = NULL;
 
-        int result = pthread_create( new_context->thread_state, NULL, clientProcess, new_context );
-        assert( !result );
-        pthread_detach( *new_context->thread_state ); // Release the thread, so it auto cleans on exit without a join()
-        pthread_mutex_lock( &client_list_mutex );
-        client_list = g_list_prepend( client_list, new_context );
-        pthread_mutex_unlock( &client_list_mutex );
+        pthread_mutex_lock(&client_list_mutex);
+        ll_append( client_list, new_context );
 
-        //printf( "%d active threads...\n", g_list_length( client_list ) );
+        // While we have the lock, go find any dead processes
+        /*struct list_element * prev = NULL;
+        struct list_element * iter = client_list->head;
+        while( iter != NULL ) {
+            if( ((client_context_t *)iter->data)->state == GNW_STATE_ZOMBIE ) {
+                printf( "Removing %lx\n", ((client_context_t *)iter->data)->address );
+                if( prev == NULL )
+                    client_list->head = iter->next;
+                else
+                    prev->next = iter->next;
+
+                struct list_element * next = iter->next;
+                free( iter->data );
+                free( iter );
+
+                iter = next;
+                continue;
+            }
+            iter = iter->next;
+            prev = iter;
+        }*/
+
+        pthread_mutex_unlock(&client_list_mutex);
+
+        int result = pthread_create( new_context->thread_state, NULL, clientProcess, new_context );
+        assert( !result, "Could not create a new child process!" );
+        pthread_detach( *new_context->thread_state ); // Release the thread, so it auto cleans on exit without a join()
+
+        emitStatistics( stdout );
+        printf( "%d active threads...\n", ll_length( client_list ) );
     }
 
     if( listen_fd != -1 )
@@ -375,74 +488,136 @@ int router_process() {
     return EXIT_SUCCESS;
 }
 
+// Remote command - STATUS
+int exec_remote_status() {
+    int rfd = socket_connect( "127.0.0.1", ROUTER_PORT );
+
+    close( rfd );
+}
+
 #define ARG_STATUS     0
 #define ARG_POLICY     1
 #define ARG_CONNECT    2
 #define ARG_DISCONNECT 3
+#define ARG_SOURCE     4
+#define ARG_TARGET     5
 
 int main(int argc, char ** argv ) {
 
+    setExitOnAssert( true ); // Crash out on assertion failures!
+
     config.network_mtu = getIFaceMTU( "lo" );
+    config.system_state = SYSTEM_ACTIVE;
 
     if( config.network_mtu == -1 ) {
         fprintf( stderr, "Unable to query the local interface MTU, defaulting to 4k\n" );
         //config.network_mtu = 4096;
-        config.network_mtu = 4096 * 20;
+        config.network_mtu = 1500;
     }
 
-    struct option longOptions[2] = { 0 };
-    longOptions[ARG_STATUS].name    = "status";
-    longOptions[ARG_STATUS].has_arg = no_argument;
-    longOptions[ARG_STATUS].flag    = NULL;
+    // If we have any arguments, assume that this is a remote command.
+    if( argc > 1 ) {
+        int rfd = socket_connect( "127.0.0.1", ROUTER_PORT ); // Assume local, for now.
 
-    // Argument Parsing //
-    int arg;
-    int indexPtr = 0;
-    while( (arg = getopt_long( argc, argv, "", longOptions, &indexPtr )) != -1 ) {
-        switch( arg ) {
-            case ARG_STATUS: {
-                int cmd_fd = open( COMMAND_PIPE_PATH, O_RDWR );
-                FILE * cmd_file = fdopen( cmd_fd, "w+" );
+        struct option longOptions[6] = {0};
+        longOptions[ARG_STATUS].name = "status";
+        longOptions[ARG_STATUS].has_arg = no_argument;
+        longOptions[ARG_STATUS].flag = NULL;
 
-                printf( ">>> status\n" );
-                fprintf( cmd_file, "status\n" );
-                fflush( cmd_file );
+        longOptions[ARG_POLICY].name = "policy";
+        longOptions[ARG_POLICY].has_arg = required_argument;
+        longOptions[ARG_POLICY].flag = NULL;
 
-                char buffer[1024] = { 0 };
-                while( 1 ) {
-                    memset( buffer, 0, 1024 );
-                    ssize_t bytesRead = read( cmd_fd, buffer, 1024 );
+        longOptions[ARG_CONNECT].name = "connect";
+        longOptions[ARG_CONNECT].has_arg = no_argument;
+        longOptions[ARG_CONNECT].flag = NULL;
 
-                    if (bytesRead == -1)
-                        break;
+        longOptions[ARG_DISCONNECT].name = "disconnect";
+        longOptions[ARG_DISCONNECT].has_arg = no_argument;
+        longOptions[ARG_DISCONNECT].flag = NULL;
 
-                    if( bytesRead > 0 ) {
-                        printf("<<<\n");
+        longOptions[ARG_SOURCE].name = "source";
+        longOptions[ARG_SOURCE].has_arg = required_argument;
+        longOptions[ARG_SOURCE].flag = NULL;
 
-                        if (buffer + bytesRead - 4 > 0 && strncmp(buffer + bytesRead - 4, "EOL\n", 4) == 0)
-                            break;
+        longOptions[ARG_TARGET].name = "target";
+        longOptions[ARG_TARGET].has_arg = required_argument;
+        longOptions[ARG_TARGET].flag = NULL;
 
-                        printf("[%d] %s\n", bytesRead, buffer);
-                    }
+        gnw_address_t arg_source_address = 0;
+        gnw_address_t arg_target_address = 0;
+
+        // Argument Parsing //
+        int arg;
+        int indexPtr = 0;
+        while ((arg = getopt_long(argc, argv, "", longOptions, &indexPtr)) != -1) {
+            switch (indexPtr) {
+                case ARG_STATUS: {
+                    unsigned char buffer[1] = { GNW_CMD_STATUS };
+                    gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 1);
+
+                    close(rfd);
+                    return EXIT_SUCCESS;
                 }
 
-                close( cmd_fd );
-                return EXIT_SUCCESS;
+                case ARG_POLICY: {
+                    unsigned char buffer[2 + sizeof(gnw_address_t)];
+                    *buffer = GNW_CMD_POLICY;
+
+                    if( strncmp(optarg, "broadcast", 9 ) == 0 )
+                        *(buffer+1) = GNW_BROADCAST;
+                    else if( strncmp(optarg, "roundrobin", 10 ) == 0 )
+                        *(buffer+1) = GNW_ROUNDROBIN;
+                    else if( strncmp(optarg, "anycast", 7 ) == 0 )
+                        *(buffer+1) = GNW_ANYCAST;
+
+                    *(gnw_address_t *)(buffer+2) = arg_target_address;
+
+                    gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 2+sizeof(gnw_address_t) );
+
+                    close(rfd);
+                    return EXIT_SUCCESS;
+                }
+
+                case ARG_CONNECT: {
+                    printf( "Connect!\n" );
+                    unsigned char buffer[1 + (sizeof(gnw_address_t)*2) ];
+                    *buffer = GNW_CMD_CONNECT;
+                    gnw_address_t * source = (gnw_address_t *)(buffer+1);
+                    gnw_address_t * target = (gnw_address_t *)(buffer+1+sizeof(gnw_address_t));
+
+                    *source = arg_source_address;
+                    *target = arg_target_address;
+
+                    printf( "%x -> %x\n", arg_source_address, arg_target_address );
+
+                    gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 1+ (sizeof(gnw_address_t)*2) );
+
+                    close(rfd);
+                    return EXIT_SUCCESS;
+                }
+
+                case ARG_DISCONNECT: {
+                    unsigned char buffer[1] = {GNW_CMD_DISCONNECT};
+                    gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 1);
+
+                    close(rfd);
+                    return EXIT_SUCCESS;
+                }
+
+                case ARG_SOURCE: arg_source_address = strtoul( optarg, NULL, 10 ); break;
+                case ARG_TARGET: arg_target_address = strtoul( optarg, NULL, 10 ); break;
+
+                default:
+                    fprintf(stderr, "Bad command combination. STOP.");
+                    close( rfd );
+                    return EXIT_SUCCESS;
             }
-
-            case ARG_POLICY:
-                return EXIT_FAILURE;
-
-            case ARG_CONNECT:
-                return EXIT_FAILURE;
-
-            case ARG_DISCONNECT:
-                return EXIT_FAILURE;
-
-            default:
-                fprintf( stderr, "Bad command combination. STOP." );
-                return EXIT_FAILURE;
         }
+
+        fprintf( stderr, "Unrecognised argument combination...?\n" );
+        close( rfd );
+        return EXIT_SUCCESS;
     }
 
     return router_process();

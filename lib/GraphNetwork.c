@@ -56,14 +56,14 @@ void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length ) {
 
     // Optionally use the header length
     if( length == -1 )
-        length = header->length;
+        length = header->length + sizeof(gnw_header_t);
 
     unsigned char * payload = buffer + sizeof( gnw_header_t );
     ssize_t payload_length = length - sizeof( gnw_header_t );
 
     fprintf( fd, "Has correct magic? %s\n", ( header->magic == GNW_MAGIC ? "Yes" : "No" ) );
     fprintf( fd, "Version:\t%x\n", header->version );
-    fprintf( fd, "Type:\t%x\t(" );
+    fprintf( fd, "Type:\t%x\t(", header->type );
     switch( header->type ) {
         case GNW_COMMAND: fprintf( fd, "COMMAND" ); break;
         case GNW_DATA:    fprintf( fd, "DATA" );    break;
@@ -72,10 +72,11 @@ void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length ) {
             fprintf( fd, "???" );
     }
     fprintf( fd, ")\n" );
+    fprintf( fd, "Length:\t%dB\n", header->length );
 
     for( int i=0; i<payload_length; i++ ) {
-        fprintf( fd, "%02x ", payload[i] );
-        if( i % 8 == 0 )
+        fprintf( fd, "%02x ", *(payload+i) );
+        if( i % 8 == 0 && i != 0 )
             fprintf( fd, "\n" );
     }
 }
@@ -120,6 +121,20 @@ void gnw_emitCommandPacket( int fd, uint8_t type, unsigned char * buffer, ssize_
 void gnw_sendCommand( int fd, uint8_t command ) {
     unsigned char buffer[1] = { command };
     gnw_emitCommandPacket( fd, GNW_COMMAND, buffer, 1 );
+}
+
+
+void gnw_request_connect( int fd, gnw_address_t _source, gnw_address_t _target ) {
+    // Connect to a process automatically :)
+    unsigned char cbuffer[1 + (sizeof(gnw_address_t)*2) ];
+    *cbuffer = GNW_CMD_CONNECT;
+    gnw_address_t * source = (gnw_address_t *)(cbuffer+1);
+    gnw_address_t * target = (gnw_address_t *)(cbuffer+1+sizeof(gnw_address_t));
+
+    *source = _source;
+    *target = _target;
+
+    gnw_emitCommandPacket(fd, GNW_COMMAND, cbuffer, 1+ (sizeof(gnw_address_t)*2) );
 }
 
 
