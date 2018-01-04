@@ -501,9 +501,9 @@ int main(int argc, char ** argv ) {
             // Handle any events on the process output
             if( watch_fd[PROCESS_OUT].revents != 0 ) {
                 if (watch_fd[PROCESS_OUT].revents & POLLIN == POLLIN) {
-                    char buffer[1024] = {0};
+                    char buffer[config.network_mtu];
 
-                    ssize_t bytesRead = read(watch_fd[PROCESS_OUT].fd, &buffer, 1024);
+                    ssize_t bytesRead = read(watch_fd[PROCESS_OUT].fd, &buffer, config.network_mtu);
                     gnw_emitDataPacket( data_fd, buffer, bytesRead );
                 }
                 watch_fd[PROCESS_OUT].revents = 0; // Manual reset, not strictly required, but just in case...
@@ -512,24 +512,22 @@ int main(int argc, char ** argv ) {
             // Handle any events on the input stream from the router
             if( watch_fd[SOCKET_IN].revents != 0 ) {
                 if( watch_fd[SOCKET_IN].revents & POLLIN == POLLIN ) {
-                    char buffer[1024] = {0};
+                    char buffer[config.network_mtu];
 
-                    ssize_t bytesRead = read(watch_fd[SOCKET_IN].fd, buffer, 1024);
+                    ssize_t bytesRead = read(watch_fd[SOCKET_IN].fd, buffer, config.network_mtu);
 
-                    gnw_dumpPacket( stdout, buffer, bytesRead );
+                    if( bytesRead == 0 ) {
+                        fail( "Router connection hung up! Crash?" );
+                    }
 
                     gnw_header_t * header = (gnw_header_t *)buffer;
                     ssize_t length = bytesRead - sizeof( gnw_header_t );
                     char * payload = buffer + sizeof( gnw_header_t );
-                    assert( header->type == GNW_DATA, "Non-Data packet?" );
+                    if( header->type == GNW_DATA ) {
+                        *(payload + header->length) = '\0'; // Zero the end of the buffer
 
-                    *(payload + header->length) = '\0'; // Zero the end of the buffer
-
-                    ssize_t bytesWritten = write( PIPE_WRITE(wrap_stdin), payload, length );
-                    assert( length == bytesWritten, "Could not push all data to the wrapped process!" );
-
-                    if( bytesRead == 0 ) {
-                        fail( "Router connection hung up! Crash?" );
+                        ssize_t bytesWritten = write(PIPE_WRITE(wrap_stdin), payload, length);
+                        assert(length == bytesWritten, "Could not push all data to the wrapped process!");
                     }
                 }
             }
