@@ -22,6 +22,7 @@
 #include <net/if.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include "utility.h"
 
 uint32_t strlen_array( unsigned int offset, unsigned int length, char ** array ) {
@@ -33,36 +34,30 @@ uint32_t strlen_array( unsigned int offset, unsigned int length, char ** array )
     return count;
 }
 
-char * const fmt_sizeStr[6] = { "B", "KB", "MB", "GB", "TB", "PB" };
-unsigned long long fmt_humanSize( unsigned long long size, char * unitRef ) {
-    unsigned long long mul = 0;
-    while( size > 1024 ) {
+char * const fmt_iec_sizeStr[9] = { "B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB" };
+double fmt_iec_size(uint64_t _size, char ** unitRef) {
+    double size = (double)_size;
+    unsigned int mul = 0;
+    while( size > 1023 && mul < 9 ) {
         size = size / 1024;
-        //printf( "Size: %llu %s\n", size, fmt_sizeStr[mul] );
-        unitRef = fmt_sizeStr[mul];
         mul++;
     }
+
+    *unitRef = fmt_iec_sizeStr[mul];
+
     return size;
 }
 
-/**
- * This <strong>should</strong> get the MTU of the supplied interface, but it doesn't work.
- * Can't find a good source on how ioctl calls like this are supposed to work, which makes
- * this pretty much impossible.
- *
- * @param interface The interface to query
- * @return The MTU of the interface supplied
- */
-int getIFaceMTU( const char * interface ) {
-    int dev = open( "/proc/net/dev", O_RDONLY );
-
-    struct ifreq query;
-    memcpy( query.ifr_name, interface, strlen(interface) );
-
-    if( ioctl( dev, SIOCGIFMTU, &query ) == 0 ) {
-        close( dev );
-        return query.ifr_mtu;
+char * const fmt_si_sizeStr[9] = { "B", "kB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB" };
+double fmt_si_size(uint64_t _size, char ** unitRef) {
+    double size = (double)_size;
+    unsigned int mul = 0;
+    while( size > 999 && mul < 9 ) {
+        size = size / 1000;
+        mul++;
     }
-    close( dev );
-    return -1;
+
+    *unitRef = fmt_si_sizeStr[mul];
+
+    return size;
 }

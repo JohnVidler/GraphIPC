@@ -27,13 +27,13 @@ add_library( DataStructures lib/RingBuffer.c lib/RingBuffer.h lib/LinkedList.c l
 add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h)
 add_library( Assert lib/Assert.c lib/Assert.h)
 
-add_executable( GraphWrap GraphWrap.c lib/utility.c lib/utility.h lib/GraphNetwork.h common.c common.h)
+add_executable( GraphWrap GraphWrap.c lib/utility.c lib/utility.h lib/GraphNetwork.h common.c common.h )
 target_link_libraries( GraphWrap ${CMAKE_THREAD_LIBS_INIT} GraphNetwork DataStructures Assert )
 
-add_executable( GraphRouter GraphRouter.c lib/utility.c lib/utility.h lib/GraphNetwork.h lib/Assert.c lib/Assert.h common.c common.h)
+add_executable( GraphRouter GraphRouter.c lib/utility.c lib/utility.h lib/GraphNetwork.h lib/Assert.c lib/Assert.h common.c common.h )
 target_link_libraries( GraphRouter ${CMAKE_THREAD_LIBS_INIT} ${GLIB_LIBRARIES} GraphNetwork DataStructures Assert )
 
 add_executable( ArgTest ArgTest.c )
 
-add_executable( UnitTests UnitTests.c)
+add_executable( UnitTests UnitTests.c lib/utility.h lib/utility.c )
 target_link_libraries( UnitTests DataStructures ${CMAKE_THREAD_LIBS_INIT} Assert GraphNetwork )

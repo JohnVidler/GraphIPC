@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <memory.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 
 int socket_connect(const char *host, const char *port) {
     struct addrinfo hints;
@@ -58,4 +60,31 @@ int socket_connect(const char *host, const char *port) {
     freeaddrinfo(client_info); // all done with this structure
 
     return sockfd;
+}
+
+/**
+ * This <strong>should</strong> get the MTU of the supplied interface, but it doesn't work.
+ * Can't find a good source on how ioctl calls like this are supposed to work, which makes
+ * this pretty much impossible.
+ *
+ * @param interface The interface to query
+ * @return The MTU of the interface supplied
+ */
+int getIFaceMTU( const char * interface ) {
+    // Build the query
+    struct ifreq query;
+    memcpy( query.ifr_name, interface, strlen(interface) );
+    query.ifr_name[strlen(interface)] = '\0';
+
+    int sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if( sock < 0 )
+        return -1;
+
+    if( ioctl( sock, SIOCGIFMTU, &query ) == 0 ) {
+        close( sock );
+        return query.ifr_mtu;
+    }
+
+    close( sock );
+    return -1;
 }

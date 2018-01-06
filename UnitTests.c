@@ -20,13 +20,14 @@
 #include <stdbool.h>
 #include <memory.h>
 #include <limits.h>
+#include <math.h>
 #include "lib/Assert.h"
 #include "lib/RingBuffer.h"
 #include "lib/GraphNetwork.h"
+#include "lib/utility.h"
 
 void test_ring_buffer() {
     RingBuffer_t * buffer = ringbuffer_init( 128 );
-    ringbuffer_print( buffer );
     assert( buffer != NULL, "No ring buffer structure was generated" );
     assert( ringbuffer_capacity(buffer) == 127, "Ring buffer was not created with requested size" );
     assert( ringbuffer_length(buffer) == 0, "Ring buffer was not created with zero data" );
@@ -101,16 +102,33 @@ void test_network_sync() {
     ringbuffer_destroy( rx_buffer );
 }
 
+void test_utility_functions() {
+
+    uint64_t test_size = 1;
+    for( uint64_t i=0; i<10; i++ ) {
+        test_size = test_size * 100;
+
+        printf( "%lu B =>", test_size );
+
+        char * iec_suffix = "?";
+        double iec_formatted_size = fmt_iec_size( test_size, &iec_suffix );
+        printf( "\t%.2f %s =>", iec_formatted_size, iec_suffix );
+
+        char * si_suffix = "?";
+        double si_formatted_size = fmt_si_size( test_size, &si_suffix );
+        printf( "\t%.2f %s\n", si_formatted_size, si_suffix );
+    }
+}
+
 int main(int argc, char * argv ) {
 
     setReportAssert( false );
     setExitOnAssert( true );
 
-    //test_ring_buffer();
-
+    test_ring_buffer();
     test_network_sync();
 
-    printf( "Done. Bye\n" );
+    test_utility_functions();
 
     return EXIT_SUCCESS;
 }

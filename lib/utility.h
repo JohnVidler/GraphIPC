@@ -21,6 +21,5 @@
 
 uint32_t strlen_array( unsigned int offset, unsigned int length, char ** array );
 
-unsigned long long fmt_humanSize( unsigned long long size, char * unitRef );
-
-int getIFaceMTU( const char * interface );
+double fmt_iec_size(uint64_t size, char **unitRef);
+double fmt_si_size(uint64_t size, char ** unitRef);

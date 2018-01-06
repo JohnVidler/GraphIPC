@@ -149,7 +149,7 @@ void emitStatistics( FILE * stream ) {
             }
 
             char *ref = NULL;
-            fmt_humanSize(context->bytes_out, ref);
+            fmt_iec_size(context->bytes_out, ref);
 
             fprintf(stream, "%lx\t%s\t%luB\t%luB\t%s\t{ ",
                     context->address,
@@ -510,10 +510,11 @@ int main(int argc, char ** argv ) {
     config.system_state = SYSTEM_ACTIVE;
 
     if( config.network_mtu == -1 ) {
-        fprintf( stderr, "Unable to query the local interface MTU, defaulting to 4k\n" );
+        fprintf( stderr, "Unable to query the local interface MTU, defaulting to 1500\n" );
         //config.network_mtu = 4096;
         config.network_mtu = 1500;
     }
+    fprintf( stderr, "Network MTU detected as %d B\n", config.network_mtu );
 
     // If we have any arguments, assume that this is a remote command.
     if( argc > 1 ) {
