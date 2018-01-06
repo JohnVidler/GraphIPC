@@ -21,5 +21,7 @@
 
 uint32_t strlen_array( unsigned int offset, unsigned int length, char ** array );
 
+void str_min_width( char * buffer, char pad_char, size_t width );
+
 double fmt_iec_size(uint64_t size, char **unitRef);
 double fmt_si_size(uint64_t size, char ** unitRef);

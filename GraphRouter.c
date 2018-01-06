@@ -52,6 +52,8 @@ typedef struct client_context {
     int socket_fd;
     RingBuffer_t * rx_buffer;
     int state;
+    uint64_t packets_in;
+    uint64_t packets_out;
     uint64_t bytes_in;
     uint64_t bytes_out;
 
@@ -107,7 +109,7 @@ int getListenSocket( struct addrinfo * hints ) {
 }
 
 void emitStatistics( FILE * stream ) {
-    fprintf( stream, "UID\tState\tIn\tOut\tPolicy\t\tLinks\n" );
+    fprintf( stream, "UID          | State     | In            | Out           | Policy    | Links\n" );
     pthread_mutex_lock( &client_list_mutex );
 
     struct list_element *iter;
@@ -148,21 +150,26 @@ void emitStatistics( FILE * stream ) {
                     sprintf(policy_str, "???");
             }
 
-            char *ref = NULL;
-            fmt_iec_size(context->bytes_out, ref);
+            char *out_suffix = NULL;
+            double scaled_bytes_out = fmt_iec_size(context->bytes_out, &out_suffix);
 
-            fprintf(stream, "%lx\t%s\t%luB\t%luB\t%s\t{ ",
+            char *in_suffix = NULL;
+            double scaled_bytes_in = fmt_iec_size(context->bytes_in, &in_suffix);
+
+            fprintf(stream, "%012lx |%10s |%10.2f %3s |%10.2f %3s |%10s |",
                     context->address,
                     state_str,
-                    context->bytes_in,
-                    context->bytes_out,
+                    scaled_bytes_in,
+                    in_suffix,
+                    scaled_bytes_out,
+                    out_suffix,
                     policy_str);
 
             for (int i = 0; i < GNW_MAX_LINKS; i++) {
                 if (context->links[i] != NULL)
                     fprintf(stream, "%lu ", context->links[i]->address);
             }
-            fprintf(stream, "}\n");
+            fprintf(stream, "\n");
         }
     }
     pthread_mutex_unlock( &client_list_mutex );
@@ -212,7 +219,7 @@ void * clientProcess( void * _context ) {
     printf( "%s\tState: OPEN\n", clientAddress );
 
     // Fire up our ring buffer
-    context->rx_buffer = ringbuffer_init( config.network_mtu * 20 ); // 20 packets of MTU-size
+    context->rx_buffer = ringbuffer_init( config.network_mtu * 100 ); // 20 packets of MTU-size
 
     // Probably should be part of the thread context structure, but here for now...
     gnw_state_t parser_context = { .state = 0 };
@@ -244,7 +251,6 @@ void * clientProcess( void * _context ) {
 
         // Timeout...
         if( rv == 0 ) {
-            fprintf( stdout, "%s\tTick (State: %d)\n", clientAddress, context->state );
             if( context->state == GNW_STATE_OPEN ) {
                 if (logout_timeout-- < 0) {
                     fprintf( stdout, "Client %s timed out, dropping them.\n", clientAddress );
@@ -264,6 +270,7 @@ void * clientProcess( void * _context ) {
             memset( latchBuffer, 0, config.network_mtu ); // Here purely for sanity, remove for speeeeeed
             bytes = read(context->socket_fd, latchBuffer, config.network_mtu);
             context->bytes_in += bytes;
+            context->packets_in++;
         }
 
         // Attempt (or re-attempt) to push to the ring, backing off as required.
@@ -284,18 +291,43 @@ void * clientProcess( void * _context ) {
 
                     switch( context->link_policy ) {
                         case GNW_BROADCAST:
-                            for( int i=0; i<10; i++ ) {
+                            for( int i=0; i<GNW_MAX_LINKS; i++ ) {
                                 if( context->links[i] != NULL ) {
                                     gnw_emitDataPacket(context->links[i]->socket_fd, packet_payload, packet_header->length);
                                     context->bytes_out += packet_header->length;
+                                    context->packets_out++;
+                                    context->links[i]->bytes_in += packet_header->length;
+                                    context->links[i]->packets_in++;
                                 }
                             }
                             break;
 
-                        case GNW_ANYCAST:
+                        case GNW_ANYCAST: {
+                            int offset = rand() % GNW_MAX_LINKS; // FIXME: This looks super non-uniform distribution! Is there a de-facto version of Anycast selection?
+                            while (context->links[offset] == NULL) {
+                                offset = (offset + 1) % GNW_MAX_LINKS;
+                            }
+
+                            gnw_emitDataPacket(context->links[offset]->socket_fd, packet_payload, packet_header->length);
+                            context->bytes_out += packet_header->length;
+                            context->packets_out++;
+                            context->links[offset]->bytes_in += packet_header->length;
+                            context->links[offset]->packets_in++;
+
                             break;
+                        }
 
                         case GNW_ROUNDROBIN:
+                            context->roundrobin_index = (context->roundrobin_index + 1) % GNW_MAX_LINKS;
+                            while( context->links[context->roundrobin_index] == NULL )
+                                context->roundrobin_index = (context->roundrobin_index + 1) % GNW_MAX_LINKS;
+
+                            gnw_emitDataPacket(context->links[context->roundrobin_index]->socket_fd, packet_payload, packet_header->length);
+                            context->bytes_out += packet_header->length;
+                            context->packets_out++;
+                            context->links[context->roundrobin_index]->bytes_in += packet_header->length;
+                            context->links[context->roundrobin_index]->packets_in++;
+
                             break;
                     }
 
@@ -406,6 +438,15 @@ void * clientProcess( void * _context ) {
     return NULL;
 }
 
+// Just emit some stats ever 5 seconds
+void * status_process( void * notused ) {
+    while( config.system_state ) {
+        emitStatistics( stdout );
+
+        sleep( 5 );
+    }
+}
+
 int router_process() {
 
     // Set up the socket server
@@ -428,6 +469,12 @@ int router_process() {
     client_list = ll_create();
     pthread_mutex_init( &client_list_mutex, NULL );
 
+    // Begin running the status process (maybe this should become a watchdog in the future?)
+    printf( "STATUS CREATE\n" );
+    pthread_t status_context = { 0 };
+    pthread_create( &status_context, NULL, status_process, NULL );
+    pthread_detach( status_context );
+
     while( config.system_state ) {
         struct sockaddr_storage remote_socket;
         socklen_t newSock_len = sizeof( socklen_t );
@@ -436,6 +483,8 @@ int router_process() {
             perror( "accept" );
             continue;
         }
+
+        printf( "SOCK: %d\n", remote_fd );
 
         client_context_t *new_context = malloc(sizeof(client_context_t));
         memset(new_context, 0, sizeof(client_context_t));
@@ -477,22 +526,12 @@ int router_process() {
         int result = pthread_create( new_context->thread_state, NULL, clientProcess, new_context );
         assert( !result, "Could not create a new child process!" );
         pthread_detach( *new_context->thread_state ); // Release the thread, so it auto cleans on exit without a join()
-
-        emitStatistics( stdout );
-        printf( "%d active threads...\n", ll_length( client_list ) );
     }
 
     if( listen_fd != -1 )
         close( listen_fd );
 
     return EXIT_SUCCESS;
-}
-
-// Remote command - STATUS
-int exec_remote_status() {
-    int rfd = socket_connect( "127.0.0.1", ROUTER_PORT );
-
-    close( rfd );
 }
 
 #define ARG_STATUS     0

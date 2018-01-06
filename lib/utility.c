@@ -34,6 +34,16 @@ uint32_t strlen_array( unsigned int offset, unsigned int length, char ** array )
     return count;
 }
 
+void str_min_width( char * buffer, char pad_char, size_t width ) {
+    size_t length = strlen(buffer);
+    if( length < width ) {
+        for( size_t i=0; i<width-length; i++) {
+            *(buffer+length+i) = pad_char;
+        }
+        *(buffer+width) = '\0';
+    }
+}
+
 char * const fmt_iec_sizeStr[9] = { "B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB" };
 double fmt_iec_size(uint64_t _size, char ** unitRef) {
     double size = (double)_size;

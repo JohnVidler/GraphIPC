@@ -232,6 +232,13 @@ int main(int argc, char ** argv ) {
     sigaction( SIGHUP, &sa, NULL );
     sigaction( SIGKILL, &sa, NULL );
 
+    // Check the system MTU and match it - this assumes local operation, for now.
+    // Note: Possibly add an override for this in the flags...
+    config.network_mtu = getIFaceMTU( "lo" );
+
+    if( config.network_mtu > 4096 ) // Excessive copy op.
+        config.network_mtu = 1024;
+
     // Argument Parsing //
     char arg;
     while( (arg = getopt(argc, argv, "u:d:p:t:bio")) != -1 ) {
@@ -379,7 +386,7 @@ int main(int argc, char ** argv ) {
         char buffer[config.network_mtu];
 
         int rv = 0;
-        while( (rv = poll(watch_fd, 1, 0)) != -1 ) {
+        while( (rv = poll(watch_fd, 1, 1000)) != -1 ) {
             if( rv > 0 ) {
                 memset( buffer, 0, config.network_mtu );
                 ssize_t readBytes = read( watch_fd[0].fd, buffer, config.network_mtu );
@@ -410,7 +417,7 @@ int main(int argc, char ** argv ) {
         char buffer[config.network_mtu];
 
         int rv = 0;
-        while( (rv = poll(watch_fd, 1, 0)) != -1 ) {
+        while( (rv = poll(watch_fd, 1, 1000)) != -1 ) {
             if( rv > 0 ) {
                 ssize_t bytesRead = read( data_fd, buffer, config.network_mtu );
                 if( bytesRead <= 0 ) {
