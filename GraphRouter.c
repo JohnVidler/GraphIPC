@@ -559,30 +559,15 @@ int main(int argc, char ** argv ) {
     if( argc > 1 ) {
         int rfd = socket_connect( "127.0.0.1", ROUTER_PORT ); // Assume local, for now.
 
-        struct option longOptions[6] = {0};
-        longOptions[ARG_STATUS].name = "status";
-        longOptions[ARG_STATUS].has_arg = no_argument;
-        longOptions[ARG_STATUS].flag = NULL;
-
-        longOptions[ARG_POLICY].name = "policy";
-        longOptions[ARG_POLICY].has_arg = required_argument;
-        longOptions[ARG_POLICY].flag = NULL;
-
-        longOptions[ARG_CONNECT].name = "connect";
-        longOptions[ARG_CONNECT].has_arg = no_argument;
-        longOptions[ARG_CONNECT].flag = NULL;
-
-        longOptions[ARG_DISCONNECT].name = "disconnect";
-        longOptions[ARG_DISCONNECT].has_arg = no_argument;
-        longOptions[ARG_DISCONNECT].flag = NULL;
-
-        longOptions[ARG_SOURCE].name = "source";
-        longOptions[ARG_SOURCE].has_arg = required_argument;
-        longOptions[ARG_SOURCE].flag = NULL;
-
-        longOptions[ARG_TARGET].name = "target";
-        longOptions[ARG_TARGET].has_arg = required_argument;
-        longOptions[ARG_TARGET].flag = NULL;
+        struct option longOptions[7] = {
+                [ARG_STATUS] =     { .name="status",     .has_arg=no_argument,       .flag=NULL },
+                [ARG_POLICY] =     { .name="policy",     .has_arg=required_argument, .flag=NULL },
+                [ARG_CONNECT] =    { .name="connect",    .has_arg=no_argument,       .flag=NULL },
+                [ARG_DISCONNECT] = { .name="disconnect", .has_arg=no_argument,       .flag=NULL },
+                [ARG_SOURCE] =     { .name="source",     .has_arg=required_argument, .flag=NULL },
+                [ARG_TARGET] =     { .name="target",     .has_arg=required_argument, .flag=NULL },
+                0
+        };
 
         gnw_address_t arg_source_address = 0;
         gnw_address_t arg_target_address = 0;
