@@ -86,12 +86,13 @@ void gnw_emitPacket( int fd, unsigned char * buffer, size_t length ) {
     link_stats.bytesWritten += written;
 }
 
-void gnw_emitDataPacket( int fd, unsigned char * buffer, ssize_t length ) {
+void gnw_emitDataPacket( int fd, gnw_address_t source,  unsigned char * buffer, ssize_t length ) {
     link_stats.dataPackets++;
     unsigned char * packet = (unsigned char *)malloc( length + sizeof(gnw_header_t) );
     ((gnw_header_t *)packet)->magic    = GNW_MAGIC;
     ((gnw_header_t *)packet)->version  = GNW_VERSION;
     ((gnw_header_t *)packet)->type     = GNW_DATA;
+    ((gnw_header_t *)packet)->source   = source;
     ((gnw_header_t *)packet)->length   = (uint16_t )length;
 
     if( buffer != NULL )

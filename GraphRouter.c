@@ -116,7 +116,7 @@ void emitStatistics( FILE * stream ) {
     for (iter = client_list->head; iter != NULL; iter = iter->next) {
         client_context_t * context = (client_context_t *)iter->data;
 
-        if( context->state != GNW_STATE_ZOMBIE ) {
+        //if( context->state != GNW_STATE_ZOMBIE ) {
             char state_str[32] = {0};
             switch (context->state) {
                 case GNW_STATE_OPEN:
@@ -170,7 +170,7 @@ void emitStatistics( FILE * stream ) {
                     fprintf(stream, "%lu ", context->links[i]->address);
             }
             fprintf(stream, "\n");
-        }
+        //}
     }
     pthread_mutex_unlock( &client_list_mutex );
     fprintf( stream, "\n" );
@@ -293,7 +293,7 @@ void * clientProcess( void * _context ) {
                         case GNW_BROADCAST:
                             for( int i=0; i<GNW_MAX_LINKS; i++ ) {
                                 if( context->links[i] != NULL ) {
-                                    gnw_emitDataPacket(context->links[i]->socket_fd, packet_payload, packet_header->length);
+                                    gnw_emitDataPacket(context->links[i]->socket_fd, context->address, packet_payload, packet_header->length);
                                     context->bytes_out += packet_header->length;
                                     context->packets_out++;
                                     context->links[i]->bytes_in += packet_header->length;
@@ -308,7 +308,7 @@ void * clientProcess( void * _context ) {
                                 offset = (offset + 1) % GNW_MAX_LINKS;
                             }
 
-                            gnw_emitDataPacket(context->links[offset]->socket_fd, packet_payload, packet_header->length);
+                            gnw_emitDataPacket(context->links[offset]->socket_fd, context->address, packet_payload, packet_header->length);
                             context->bytes_out += packet_header->length;
                             context->packets_out++;
                             context->links[offset]->bytes_in += packet_header->length;
@@ -322,7 +322,7 @@ void * clientProcess( void * _context ) {
                             while( context->links[context->roundrobin_index] == NULL )
                                 context->roundrobin_index = (context->roundrobin_index + 1) % GNW_MAX_LINKS;
 
-                            gnw_emitDataPacket(context->links[context->roundrobin_index]->socket_fd, packet_payload, packet_header->length);
+                            gnw_emitDataPacket(context->links[context->roundrobin_index]->socket_fd, context->address, packet_payload, packet_header->length);
                             context->bytes_out += packet_header->length;
                             context->packets_out++;
                             context->links[context->roundrobin_index]->bytes_in += packet_header->length;

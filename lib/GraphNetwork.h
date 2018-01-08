@@ -79,10 +79,11 @@ typedef struct {
 
 /** GNW Packet header structure */
 typedef struct {
-    uint8_t  magic;
-    uint8_t  version;
-    uint8_t  type;
-    uint32_t length;
+    uint8_t       magic;
+    uint8_t       version;
+    uint8_t       type;
+    gnw_address_t source;
+    uint32_t      length;
 } gnw_header_t;
 
 void gnw_format_address( unsigned char * buffer, uint64_t address );
@@ -90,7 +91,7 @@ void gnw_format_address( unsigned char * buffer, uint64_t address );
 void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length );
 
 void gnw_emitPacket( int fd, unsigned char * buffer, size_t length );
-void gnw_emitDataPacket( int fd, unsigned char * buffer, ssize_t length );
+void gnw_emitDataPacket( int fd, gnw_address_t source,  unsigned char * buffer, ssize_t length );
 void gnw_emitCommandPacket( int fd, uint8_t type, unsigned char * buffer, ssize_t length );
 
 void gnw_sendCommand( int fd, uint8_t command );

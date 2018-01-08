@@ -63,9 +63,7 @@ int socket_connect(const char *host, const char *port) {
 }
 
 /**
- * This <strong>should</strong> get the MTU of the supplied interface, but it doesn't work.
- * Can't find a good source on how ioctl calls like this are supposed to work, which makes
- * this pretty much impossible.
+ * This <strong>should</strong> get the MTU of the supplied interface.
  *
  * @param interface The interface to query
  * @return The MTU of the interface supplied
@@ -87,4 +85,44 @@ int getIFaceMTU( const char * interface ) {
 
     close( sock );
     return -1;
+}
+
+/**
+ * Attempts to find a particular file from the available PATH environment variable along with
+ * the current working directory.
+ *
+ * If no PATH-prefixed path exists, the target will be filled with the original binary path.
+ *
+ * <b>Usage</b>
+ * <pre>
+ * char path[128] = { 0 };
+ * findRealPath( path, "binary_file" );
+ * </pre>
+ *
+ * @param target Character pointer to be filled with the path. Must be large enough to handle the result!
+ * @param binary The file to search for.
+ */
+void findRealPath( char * target, const char * binary ) {
+    char pathBuffer[2048] = { 0 };
+    size_t env_path_length = strlen( getenv( "PATH" ) );
+    char * path = (char *)malloc( env_path_length + 1 );
+    memcpy( path, getenv( "PATH" ), env_path_length );
+
+    char * parent = strtok( path, ":" );
+    while( parent != NULL ) {
+        memset( pathBuffer, 0, 2048 );
+        sprintf( pathBuffer, "%s/%s", parent, binary );
+
+        if( access(pathBuffer, F_OK) != -1 ) {
+            sprintf( target, "%s/%s", parent, binary );
+            free( path );
+            return;
+        }
+
+        parent = strtok( NULL, ":" );
+    }
+
+    // Guess we must have an actual path already...
+    sprintf( target, "%s", binary );
+    free( path );
 }
