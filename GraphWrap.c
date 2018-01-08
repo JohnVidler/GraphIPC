@@ -167,6 +167,8 @@ int mode_input() {
     int rv = 0;
     while( (rv = poll(watch_fd, 1, 1000)) != -1 ) {
         if( rv > 0 ) {
+            watch_fd[0].revents = 0;
+
             memset( buffer, 0, config.network_mtu );
             ssize_t readBytes = read( watch_fd[0].fd, buffer, config.network_mtu );
 
@@ -193,13 +195,16 @@ int mode_output() {
     watch_fd[0].fd = data_fd;
     watch_fd[0].events = POLLIN;
 
-    char buffer[config.network_mtu];
+    char buffer[config.network_mtu+1]; // This '+1' is here to always have a null terminator in the line marked 'kludge' below...
 
     int rv = 0;
     while( (rv = poll(watch_fd, 1, 1000)) != -1 ) {
         if( rv > 0 ) {
-            ssize_t bytesRead = read( data_fd, buffer, config.network_mtu );
+            watch_fd[0].revents = 0;
+
+            ssize_t bytesRead = read( watch_fd[0].fd, buffer, config.network_mtu );
             if( bytesRead <= 0 ) {
+                perror( "read" );
                 fprintf( stderr, "IO Error, halting!\n" );
                 return EXIT_FAILURE;
             }
@@ -274,8 +279,8 @@ void * sink_thread( void * _context ) {
     struct pollfd watch_fd[1];
     memset( watch_fd, 0, sizeof( struct pollfd ) * 2 );
 
-    watch_fd[PROCESS_OUT].fd = PIPE_READ(context->wrap_stdout);
-    watch_fd[PROCESS_OUT].events = POLLIN;
+    watch_fd[0].fd = PIPE_READ(context->wrap_stdout);
+    watch_fd[0].events = POLLIN;
 
     int rfd = getRouterFD(); // Note: we don't need to close this, the host binary will do this for us!
 
@@ -297,19 +302,21 @@ void * sink_thread( void * _context ) {
                 break;
             }
         } else {  // Data ready from the process itself.
+
             // Handle any events on the process output
-            if( watch_fd[PROCESS_OUT].revents != 0 ) {
-                if (watch_fd[PROCESS_OUT].revents & POLLIN == POLLIN) {
+            if( watch_fd[0].revents != 0 ) {
+                if (watch_fd[0].revents & POLLIN == POLLIN) {
                     unsigned char buffer[config.network_mtu];
 
-                    ssize_t bytesRead = read(watch_fd[PROCESS_OUT].fd, &buffer, config.network_mtu);
+                    ssize_t bytesRead = read(watch_fd[0].fd, &buffer, config.network_mtu);
 
                     fprintf( stderr, ">>>\t%s\n", buffer );
 
                     gnw_emitDataPacket( rfd, config.graph_address, buffer, bytesRead ); // Always emit from the node source address, not the stream source address
                 }
-                watch_fd[PROCESS_OUT].revents = 0; // Manual reset, not strictly required, but unclear in the documentation ...
             }
+
+            watch_fd[0].revents = 0;
         }
     }
 
@@ -567,15 +574,18 @@ int main(int argc, char ** argv ) {
         // If we're in "immediate mode" - we need to start the inner binary *now* for some tool-related reason
         // Address zero is invalid, but will be replaced when the first stream comes in.
         // See the documentation for createNewSink( ... ) for details.
-        if( config.arg_immediate )
-            createNewSink( inner_binary, newArgs, 0 );
+        if( config.arg_immediate ) {
+            sink_context_t * null_sink = createNewSink(inner_binary, newArgs, 0);
+
+            write( null_sink->wrap_stdin[0], "Demo text\n", 10 );
+        }
 
         // ToDO: This should wait on data from the router, and pass it to the relevant stream sink
         // Each sink then is responsible for sending their own packets back up to the router to be
         // independently handled by the thread.
 
         // Begin pulling data from the router, hand off any new streams
-        unsigned char iBuffer[config.network_mtu];
+        unsigned char iBuffer[config.network_mtu+1];
 
         ssize_t bytes_read = -1;
         bool backoff = false;
@@ -597,7 +607,7 @@ int main(int argc, char ** argv ) {
 
             while( gnw_nextPacket( config.rx_buffer, config.parser_context, iBuffer ) ) {
                 gnw_header_t * header = (gnw_header_t *)iBuffer;
-                void * payload = iBuffer+sizeof(gnw_address_t);
+                unsigned char * payload = (unsigned char *)( iBuffer + sizeof(gnw_header_t) );
 
                 if( header->version != GNW_VERSION )
                     fprintf( stderr, "WARNING: Router/Client version mismatch, things may break horribly.\n" );
@@ -606,9 +616,14 @@ int main(int argc, char ** argv ) {
                     case GNW_DATA: {
                         sink_context_t *sink_context = getSinkContext(header->source);
 
-                        // If we don't have a context, its time to spin up a new instance!
+                        // If we don't have a context, its time to spin up a new instance! (or steal a null-address context)
+                        // See the documentation for createNewSink( ... ) for details.
                         if (sink_context == NULL)
                             sink_context = createNewSink( inner_binary, newArgs, header->source );
+
+                        *(payload + header->length) = '\0'; // Kludge?
+
+                        fprintf( stderr, "<<<\t%d B\t%s\n", header->length, payload );
 
                         // By now, we should always have a valid sink context to work with.
                         if( write( PIPE_WRITE(sink_context->wrap_stdin), payload, header->length ) != header->length )

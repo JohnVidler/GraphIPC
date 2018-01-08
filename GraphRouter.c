@@ -269,16 +269,23 @@ void * clientProcess( void * _context ) {
         if( read_back_off == false ) {
             memset( latchBuffer, 0, config.network_mtu ); // Here purely for sanity, remove for speeeeeed
             bytes = read(context->socket_fd, latchBuffer, config.network_mtu);
-            context->bytes_in += bytes;
-            context->packets_in++;
+        }
+
+        if( bytes == -1 ) {
+            fprintf( stderr, "%s\tClient connection looks dropped\n", clientAddress );
+            continue;
         }
 
         // Attempt (or re-attempt) to push to the ring, backing off as required.
+        read_back_off = false;
         if( ringbuffer_write( context->rx_buffer, latchBuffer, bytes ) != bytes ) {
             fprintf(stderr, "Buffer overflow! Read backoff enabled, trying to drain the buffer...\n" );
             read_back_off = true;
-        } else {
-            read_back_off = false;
+        }
+        else
+        {
+            context->bytes_in += bytes;
+            context->packets_in++;
         }
 
         while( gnw_nextPacket( context->rx_buffer, &parser_context, iBuffer ) ) {
