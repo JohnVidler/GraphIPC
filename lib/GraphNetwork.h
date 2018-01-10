@@ -21,7 +21,7 @@
 #include "RingBuffer.h"
 //#include "RingBuffer.h"
 
-#define GNW_VERSION  1
+#define GNW_VERSION  2
 
 #define GNW_MAGIC 0x55
 
@@ -53,6 +53,8 @@
 #define GNW_BROADCAST  0
 #define GNW_ANYCAST    1
 #define GNW_ROUNDROBIN 2
+#define GNW_MERGE      3
+#define GNW_COMBINE    4
 
 #define GNW_MAX_LINKS  10
 
