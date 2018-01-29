@@ -35,16 +35,25 @@
 #define SYSTEM_ACTIVE 1
 #define SYSTEM_STOP   0
 
-#define MAX_BUFFER_SIZE   4096
-#define MAX_INPUT_BUFFER  1024
-#define COMMAND_PIPE_PATH "/tmp/GraphRouter.pipe"
-
 struct _configuration {
     int network_mtu;
     int system_state;
 };
 
 volatile struct _configuration config;
+
+typedef struct sink {
+    gnw_address_t target;
+    struct client_context * context;
+    struct sink * next;
+} sink_t;
+
+typedef struct link {
+    gnw_address_t source;
+    int policy;
+    struct sink * forward;
+    struct link * next;
+} link_t;
 
 typedef struct client_context {
     gnw_address_t address;
@@ -57,15 +66,15 @@ typedef struct client_context {
     uint64_t bytes_in;
     uint64_t bytes_out;
 
-    int link_policy;
-    struct client_context * links[GNW_MAX_LINKS];
-    int roundrobin_index;
+    link_t * routes;
+
 } client_context_t;
+
 
 linked_list_t * client_list = NULL;
 pthread_mutex_t client_list_mutex;
 
-volatile uint64_t nextAddress = 1;
+volatile uint64_t nextAddress = 0x0000;
 
 int getListenSocket( struct addrinfo * hints ) {
     int ret;
@@ -136,19 +145,19 @@ void emitStatistics( FILE * stream ) {
             }
 
             char policy_str[32] = {0};
-            switch (context->link_policy) {
-                case GNW_BROADCAST:
+            /*switch (context->link_policy) {
+                case GNW_POLICY_BROADCAST:
                     sprintf(policy_str, "BROADCAST");
                     break;
-                case GNW_ANYCAST:
+                case GNW_POLICY_ANYCAST:
                     sprintf(policy_str, "ANYCAST");
                     break;
-                case GNW_ROUNDROBIN:
+                case GNW_POLICY_ROUNDROBIN:
                     sprintf(policy_str, "ROUNDROBIN");
                     break;
                 default:
                     sprintf(policy_str, "???");
-            }
+            }*/
 
             char *out_suffix = NULL;
             double scaled_bytes_out = fmt_iec_size(context->bytes_out, &out_suffix);
@@ -165,10 +174,10 @@ void emitStatistics( FILE * stream ) {
                     out_suffix,
                     policy_str);
 
-            for (int i = 0; i < GNW_MAX_LINKS; i++) {
+            /*for (int i = 0; i < GNW_MAX_LINKS; i++) {
                 if (context->links[i] != NULL)
                     fprintf(stream, "%lu ", context->links[i]->address);
-            }
+            }*/
             fprintf(stream, "\n");
         //}
     }
@@ -296,8 +305,8 @@ void * clientProcess( void * _context ) {
             switch( packet_header->type ) {
                 case GNW_DATA:
 
-                    switch( context->link_policy ) {
-                        case GNW_BROADCAST:
+                    /*switch( context->link_policy ) {
+                        case GNW_POLICY_BROADCAST:
                             for( int i=0; i<GNW_MAX_LINKS; i++ ) {
                                 if( context->links[i] != NULL ) {
                                     gnw_emitDataPacket(context->links[i]->socket_fd, context->address, packet_payload, packet_header->length);
@@ -309,7 +318,7 @@ void * clientProcess( void * _context ) {
                             }
                             break;
 
-                        case GNW_ANYCAST: {
+                        case GNW_POLICY_ANYCAST: {
                             int offset = rand() % GNW_MAX_LINKS; // FIXME: This looks super non-uniform distribution! Is there a de-facto version of Anycast selection?
                             while (context->links[offset] == NULL) {
                                 offset = (offset + 1) % GNW_MAX_LINKS;
@@ -324,7 +333,7 @@ void * clientProcess( void * _context ) {
                             break;
                         }
 
-                        case GNW_ROUNDROBIN:
+                        case GNW_POLICY_ROUNDROBIN:
                             context->roundrobin_index = (context->roundrobin_index + 1) % GNW_MAX_LINKS;
                             while( context->links[context->roundrobin_index] == NULL )
                                 context->roundrobin_index = (context->roundrobin_index + 1) % GNW_MAX_LINKS;
@@ -336,7 +345,7 @@ void * clientProcess( void * _context ) {
                             context->links[context->roundrobin_index]->packets_in++;
 
                             break;
-                    }
+                    }*/
 
                     break;
 
@@ -385,9 +394,9 @@ void * clientProcess( void * _context ) {
                                 fprintf( stderr, "No such valid address -> %lx\n", target );
                                 break;
                             }
-                            fprintf(stdout, "%lx policy changed from %d to %d\n", target, node->link_policy,
+                            /*fprintf(stdout, "%lx policy changed from %d to %d\n", target, node->link_policy,
                                     newPolicy);
-                            node->link_policy = newPolicy;
+                            node->link_policy = newPolicy;*/
 
                             break;
                         }
@@ -413,12 +422,12 @@ void * clientProcess( void * _context ) {
                                 break;
                             }
 
-                            for( int i=0; i<10; i++ ) {
+                            /*for( int i=0; i<10; i++ ) {
                                 if( source->links[i] == NULL ) {
                                     source->links[i] = target;
                                     break;
                                 }
-                            }
+                            }*/
 
                             break;
 
@@ -497,11 +506,11 @@ int router_process() {
         memset(new_context, 0, sizeof(client_context_t));
         new_context->thread_state = malloc(sizeof(pthread_t));
         new_context->socket_fd = remote_fd;
-        new_context->address = nextAddress++;
-        new_context->link_policy = GNW_BROADCAST; // Default to broadcast
+        new_context->address = nextAddress += 0x1000;
 
-        for (int i = 0; i < GNW_MAX_LINKS; i++)
-            new_context->links[i] = NULL;
+        new_context->routes = malloc( sizeof(link_t) );
+        new_context->routes->source = new_context->address;
+        new_context->routes->policy = GNW_POLICY_BROADCAST;
 
         pthread_mutex_lock(&client_list_mutex);
         ll_append( client_list, new_context );
@@ -597,11 +606,11 @@ int main(int argc, char ** argv ) {
                     *buffer = GNW_CMD_POLICY;
 
                     if( strncmp(optarg, "broadcast", 9 ) == 0 )
-                        *(buffer+1) = GNW_BROADCAST;
+                        *(buffer+1) = GNW_POLICY_BROADCAST;
                     else if( strncmp(optarg, "roundrobin", 10 ) == 0 )
-                        *(buffer+1) = GNW_ROUNDROBIN;
+                        *(buffer+1) = GNW_POLICY_ROUNDROBIN;
                     else if( strncmp(optarg, "anycast", 7 ) == 0 )
-                        *(buffer+1) = GNW_ANYCAST;
+                        *(buffer+1) = GNW_POLICY_ANYCAST;
 
                     *(gnw_address_t *)(buffer+2) = arg_target_address;
 

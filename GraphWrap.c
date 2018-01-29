@@ -451,7 +451,8 @@ int main(int argc, char ** argv ) {
         switch (indexPtr) {
             case ARG_HELP:
             case ARG_USAGE:
-                printf( "GraphWrap\n\n" );
+                printf( "GraphWrap\n" );
+                printf( ANSI_COLOR_GREEN "\t\t\"Don't cross the streams\" --Egon Spengler.\n\n" ANSI_COLOR_RESET );
                 printf( "Wrap a normal Linux process stdin/stdout pipes with GraphIPC connections to a GraphRouter process\nAllows non-compliant programs to be used in a graph\n\n" );
                 printf( ANSI_COLOR_CYAN "--help --usage\n" ANSI_COLOR_RESET "\tShow this help message\n\n" );
                 printf( ANSI_COLOR_CYAN "-h --host [host address]\n" ANSI_COLOR_RESET "\tGraphRouter host address\n\n" );
@@ -515,11 +516,11 @@ int main(int argc, char ** argv ) {
                 *buffer = GNW_CMD_POLICY;
 
                 if (strncmp(optarg, "broadcast", 9) == 0)
-                    *(buffer + 1) = GNW_BROADCAST;
+                    *(buffer + 1) = GNW_POLICY_BROADCAST;
                 else if (strncmp(optarg, "roundrobin", 10) == 0)
-                    *(buffer + 1) = GNW_ROUNDROBIN;
+                    *(buffer + 1) = GNW_POLICY_ROUNDROBIN;
                 else if (strncmp(optarg, "anycast", 7) == 0)
-                    *(buffer + 1) = GNW_ANYCAST;
+                    *(buffer + 1) = GNW_POLICY_ANYCAST;
 
                 *(gnw_address_t *) (buffer + 2) = config.graph_address;
 

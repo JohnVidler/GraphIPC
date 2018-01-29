@@ -24,8 +24,9 @@ link_directories(${GLIB_LIBRARY_DIRS})
 find_package( Threads )
 
 add_library( DataStructures lib/RingBuffer.c lib/RingBuffer.h lib/LinkedList.c lib/LinkedList.h)
-add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h)
-add_library( Assert lib/Assert.c lib/Assert.h)
+add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h lib/AddressTrie.c lib/AddressTrie.h )
+target_link_libraries( GraphNetwork m )
+add_library( Assert lib/Assert.c lib/Assert.h )
 
 add_executable( GraphWrap GraphWrap.c lib/utility.c lib/utility.h lib/GraphNetwork.h common.c common.h )
 target_link_libraries( GraphWrap ${CMAKE_THREAD_LIBS_INIT} GraphNetwork DataStructures Assert )

@@ -19,12 +19,13 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <memory.h>
-#include <limits.h>
-#include <math.h>
+#include <time.h>
 #include "lib/Assert.h"
 #include "lib/RingBuffer.h"
 #include "lib/GraphNetwork.h"
 #include "lib/utility.h"
+#include "lib/AddressTrie.h"
+#include <arpa/inet.h>
 
 void test_ring_buffer() {
     RingBuffer_t * buffer = ringbuffer_init( 128 );
@@ -120,15 +121,82 @@ void test_utility_functions() {
     }
 }
 
+void test_forward_table() {
+
+}
+
+void printBits(size_t const size, void const * const ptr)
+{
+    unsigned char *b = (unsigned char*) ptr;
+    unsigned char byte;
+    int i, j;
+
+    for (i=size-1;i>=0;i--)
+    {
+        for (j=7;j>=0;j--)
+        {
+            byte = (b[i] >> j) & 1;
+            printf("%u", byte);
+        }
+    }
+    puts("");
+}
+
+// call this function to start a nanosecond-resolution timer
+struct timespec timer_start(){
+    struct timespec start_time;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start_time);
+    return start_time;
+}
+
+// call this function to end a timer, returning nanoseconds elapsed as a long
+long timer_end(struct timespec start_time){
+    struct timespec end_time;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end_time);
+    long diffInNanos = end_time.tv_nsec - start_time.tv_nsec;
+    return diffInNanos;
+}
+
+void test_byteTrie() {
+    address_trie_t * table = address_trie_init();
+
+    //address_trie_put(table, 1, 0x10001000, 0);
+
+    for( gnw_address_t i=0; i<0xffffff; i++ ) {
+        address_trie_put(table, 2, i, 0);
+    }
+
+    //address_trie_dump( table, 0 );
+
+    long long sum = 0;
+
+    for( int run=0; run<10000; run++) {
+        struct timespec start_time = timer_start();
+        for (int i = 0; i < 20; i++) {
+            gnw_address_t target = (gnw_address_t) (rand() % 0xffffff);
+            void *tmp = address_trie_find(table, target, 0);
+            assert(tmp != NULL, "Failed to find an address!");
+        }
+        long nanotime = timer_end(start_time) / 20;
+        sum += nanotime;
+    }
+
+    printf("Average time ~%ld ns\n", sum/10000);
+}
+
 int main(int argc, char * argv ) {
 
     setReportAssert( false );
     setExitOnAssert( true );
 
-    test_ring_buffer();
-    test_network_sync();
+    //test_ring_buffer();
+    test_byteTrie();
 
-    test_utility_functions();
+    //test_network_sync();
+
+    //test_utility_functions();
+
+    //test_forward_table();
 
     return EXIT_SUCCESS;
 }

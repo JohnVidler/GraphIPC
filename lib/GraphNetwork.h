@@ -17,6 +17,8 @@
  */
 #pragma once
 
+#include <stdlib.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include "RingBuffer.h"
 //#include "RingBuffer.h"
@@ -50,11 +52,11 @@
 #define GNW_CMD_DISCONNECT   5
 
 // Link Constants
-#define GNW_BROADCAST  0
-#define GNW_ANYCAST    1
-#define GNW_ROUNDROBIN 2
-#define GNW_MERGE      3
-#define GNW_COMBINE    4
+#define GNW_POLICY_BROADCAST  0
+#define GNW_POLICY_ANYCAST    1
+#define GNW_POLICY_ROUNDROBIN 2
+#define GNW_POLICY_MERGE      3
+#define GNW_POLICY_COMBINE    4
 
 #define GNW_MAX_LINKS  10
 
@@ -65,7 +67,7 @@
 // The router itself is uid == 0, so no process can ever be this UID.
 #define UID_INVALID 0
 
-typedef uint64_t gnw_address_t;
+typedef uint32_t gnw_address_t;
 typedef uint32_t UID_t;
 
 typedef struct {
