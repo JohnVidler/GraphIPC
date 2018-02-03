@@ -158,16 +158,23 @@ long timer_end(struct timespec start_time){
 }
 
 void test_byteTrie() {
-    address_trie_t * table = address_trie_init();
+    address_trie_t ** table = address_trie_init();
 
-    //address_trie_put(table, 1, 0x10001000, 0);
+    printf( "Generating fake table...\n" );
+    for( int i=0; i<0x1000; i++ )
+        address_trie_put(table, 1, i, 0);
 
-    for( gnw_address_t i=0; i<0xffffff; i++ ) {
-        address_trie_put(table, 2, i, 0);
-    }
+    printf( "Removing table entries...\n" );
+    for( int i=0; i<0x1000; i++ )
+        address_trie_remove(table, i, 0);
 
-    //address_trie_dump( table, 0 );
+    printf( "Final\n" );
+    address_trie_dump( table, 0 );
 
+    // Kill the outer table. Kinda has to be manual for now
+    free( table );
+
+    /*printf( "Running queries...\n" );
     long long sum = 0;
 
     for( int run=0; run<10000; run++) {
@@ -178,11 +185,11 @@ void test_byteTrie() {
             assert(tmp != NULL, "Failed to find an address!");
         }
         long nanotime = timer_end(start_time) / 20;
-        printf( "%d,%ld\n", run, nanotime );
+        //printf( "%d,%ld\n", run, nanotime );
         sum += nanotime;
     }
 
-    printf("Average time ~%ld ns\n", sum/10000);
+    printf("Average time ~%ld ns\n", sum/10000);*/
 }
 
 int main(int argc, char * argv ) {
