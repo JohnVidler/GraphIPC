@@ -66,7 +66,7 @@ typedef struct client_context {
     uint64_t bytes_in;
     uint64_t bytes_out;
 
-    link_t * routes;
+    //link_t * routes;
 
 } client_context_t;
 
@@ -508,9 +508,9 @@ int router_process() {
         new_context->socket_fd = remote_fd;
         new_context->address = nextAddress += 0x1000;
 
-        new_context->routes = malloc( sizeof(link_t) );
-        new_context->routes->source = new_context->address;
-        new_context->routes->policy = GNW_POLICY_BROADCAST;
+        //new_context->routes = malloc( sizeof(link_t) );
+        //new_context->routes->source = new_context->address;
+        //new_context->routes->policy = GNW_POLICY_BROADCAST;
 
         pthread_mutex_lock(&client_list_mutex);
         ll_append( client_list, new_context );

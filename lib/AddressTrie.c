@@ -65,11 +65,23 @@ address_trie_t * address_trie_put( address_trie_t * root, void * context, gnw_ad
     return address_trie_put( (root+localOffset)->next, context, address, maskBytes+1 );
 }
 
-void * address_trie_find( address_trie_t * root, gnw_address_t address, unsigned int maskBytes ) {
+/*bool address_trie_remove( address_trie_t * root, gnw_address_t address, unsigned int maskBytes ) {
     gnw_address_t lookupAddress = address & mask_lookup_table[maskBytes];
     uint8_t localOffset = (uint8_t)((lookupAddress >> (8*(3-maskBytes))) & 0xff);
 
-    //printf( "Step address: %08x\n", (root+localOffset)->address );
+    // Is there an address here matching at all?
+    if( (root+localOffset)->context == NULL )
+        return false;
+
+    // Is there further refinement to be done?
+    if( (root+localOffset)->next == NULL ) {
+
+    }
+}*/
+
+void * address_trie_find( address_trie_t * root, gnw_address_t address, unsigned int maskBytes ) {
+    gnw_address_t lookupAddress = address & mask_lookup_table[maskBytes];
+    uint8_t localOffset = (uint8_t)((lookupAddress >> (8*(3-maskBytes))) & 0xff);
 
     if( (root+localOffset)->address == address )
         return (root+localOffset)->context;

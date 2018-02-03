@@ -178,6 +178,7 @@ void test_byteTrie() {
             assert(tmp != NULL, "Failed to find an address!");
         }
         long nanotime = timer_end(start_time) / 20;
+        printf( "%d,%ld\n", run, nanotime );
         sum += nanotime;
     }
 

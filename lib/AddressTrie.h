@@ -33,10 +33,9 @@ typedef struct address_trie {
 } address_trie_t;
 
 address_trie_t * address_trie_init();
-void address_trie_destroy( address_trie_t * root );
 address_trie_t * address_trie_put( address_trie_t * root, void * data, gnw_address_t address, unsigned int mask );
-address_trie_t * address_trie_remove();
 void * address_trie_find( address_trie_t * root, gnw_address_t address, unsigned int maskBytes );
+bool address_trie_remove( address_trie_t * root, gnw_address_t address, unsigned int mask );
 
 void address_trie_dump( address_trie_t * root, unsigned int indent );
 

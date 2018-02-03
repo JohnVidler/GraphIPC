@@ -28,8 +28,8 @@ add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h lib/AddressTrie.
 target_link_libraries( GraphNetwork m )
 add_library( Assert lib/Assert.c lib/Assert.h )
 
-add_executable( GraphWrap GraphWrap.c lib/utility.c lib/utility.h lib/GraphNetwork.h common.c common.h )
-target_link_libraries( GraphWrap ${CMAKE_THREAD_LIBS_INIT} GraphNetwork DataStructures Assert )
+add_executable( Graph GraphWrap.c lib/utility.c lib/utility.h lib/GraphNetwork.h common.c common.h )
+target_link_libraries( Graph ${CMAKE_THREAD_LIBS_INIT} GraphNetwork DataStructures Assert )
 
 add_executable( GraphRouter GraphRouter.c lib/utility.c lib/utility.h lib/GraphNetwork.h lib/Assert.c lib/Assert.h common.c common.h )
 target_link_libraries( GraphRouter ${CMAKE_THREAD_LIBS_INIT} ${GLIB_LIBRARIES} GraphNetwork DataStructures Assert )
