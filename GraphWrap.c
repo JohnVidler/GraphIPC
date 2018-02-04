@@ -84,7 +84,7 @@ int getRouterFD() {
         config.rx_buffer = ringbuffer_init( config.network_mtu * 20 ); // 20 packet(ish) buffer
 
         // Get an address from the router, too
-        char iBuffer[config.network_mtu];
+        unsigned char iBuffer[config.network_mtu];
         while( config.graph_address == 0 ) {
             // Ask for an address
             fprintf( stderr, "Requesting an address from the router...\n" );
@@ -100,7 +100,10 @@ int getRouterFD() {
 
             while( gnw_nextPacket( config.rx_buffer, config.parser_context, iBuffer ) ) {
                 gnw_header_t * header = (gnw_header_t *)iBuffer;
-                unsigned char * payload = (unsigned char *)( iBuffer + sizeof(gnw_header_t) );
+                unsigned char * payload = iBuffer + sizeof(gnw_header_t);
+
+                // Uncomment for debug output
+                //gnw_dumpPacket( stdout, iBuffer, -1 );
 
                 if( header->version != GNW_VERSION )
                     fprintf( stderr, "Warning! Router/Client version mismatch!\n" );
@@ -108,16 +111,18 @@ int getRouterFD() {
                 switch( header->type ) {
                     case GNW_COMMAND | GNW_REPLY: // Command response
                         if( header->length < 1 ) {
-                            fprintf( stderr, "Router sent a command with no operator, no idea what to do!\n" );
+                            fprintf( stderr, "Router sent a command with no operator, no idea what to do! Trying to skip past it...\n" );
                             break;
                         }
 
                         switch( *payload ) {
                             case GNW_CMD_NEW_ADDRESS:
                                 if( config.graph_address == 0 ) {
-                                    config.graph_address = *((gnw_address_t *) (payload + 1));
+                                    config.graph_address = *(gnw_address_t *)(payload + 1);
 
-                                    config.graph_address = 0xFFFFFFFF & config.graph_address;
+                                    printf( "?> %x\n", config.graph_address );
+
+                                    //config.graph_address = 0xFFFFFFFF & config.graph_address;
                                 }
                                 break;
 
@@ -139,7 +144,7 @@ int getRouterFD() {
             }
         }
 
-        fprintf( stderr, "Address is %016lx\n", config.graph_address );
+        fprintf( stderr, "Address is %x\n", config.graph_address );
     }
     return router_fd;
 }
@@ -483,9 +488,9 @@ int main(int argc, char ** argv ) {
                     fprintf(stderr, "Could not connect to the router. STOP.\n");
                     exit(EXIT_FAILURE);
                 }
-                gnw_address_t target = strtoul( optarg, NULL, 16 );
+                gnw_address_t target = (gnw_address_t)strtoul( optarg, NULL, 16 );
 
-                fprintf( stderr, "Connecting %016lx -> %016lx\n", target, config.graph_address );
+                fprintf( stderr, "Connecting %x -> %x\n", target, config.graph_address );
 
                 gnw_request_connect( rfd, target, config.graph_address );
                 break;
@@ -498,9 +503,9 @@ int main(int argc, char ** argv ) {
                     fprintf(stderr, "Could not connect to the router. STOP.\n");
                     exit(EXIT_FAILURE);
                 }
-                gnw_address_t target = strtoul( optarg, NULL, 16 );
+                gnw_address_t target = (gnw_address_t)strtoul( optarg, NULL, 16 );
 
-                fprintf( stderr, "Connecting %016lx -> %016lx\n", config.graph_address, target );
+                fprintf( stderr, "Connecting %x -> %x\n", config.graph_address, target );
 
                 gnw_request_connect( rfd, config.graph_address, target );
                 break;

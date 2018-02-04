@@ -28,6 +28,7 @@
 #include "lib/Assert.h"
 #include "common.h"
 #include "lib/LinkedList.h"
+#include "lib/AddressTrie.h"
 #include <poll.h>
 #include <sys/un.h>
 #include <getopt.h>
@@ -43,17 +44,9 @@ struct _configuration {
 volatile struct _configuration config;
 
 typedef struct sink {
-    gnw_address_t target;
-    struct client_context * context;
+    void * target_context;
     struct sink * next;
 } sink_t;
-
-typedef struct link {
-    gnw_address_t source;
-    int policy;
-    struct sink * forward;
-    struct link * next;
-} link_t;
 
 typedef struct client_context {
     gnw_address_t address;
@@ -66,15 +59,18 @@ typedef struct client_context {
     uint64_t bytes_in;
     uint64_t bytes_out;
 
-    //link_t * routes;
+    int link_policy;
+    sink_t * links;
+    sink_t * roundrobin_iter;
 
 } client_context_t;
 
+// Note: Replace client_list with the address table (table_address)!
 
-linked_list_t * client_list = NULL;
-pthread_mutex_t client_list_mutex;
+address_trie_t ** table_address = NULL;
+pthread_mutex_t table_address_mutex;
 
-volatile uint64_t nextAddress = 0x0000;
+volatile gnw_address_t nextNodeAddress = 0;
 
 int getListenSocket( struct addrinfo * hints ) {
     int ret;
@@ -117,96 +113,88 @@ int getListenSocket( struct addrinfo * hints ) {
     return sockfd;
 }
 
-void emitStatistics( FILE * stream ) {
-    fprintf( stream, "UID          | State     | In            | Out           | Policy    | Links\n" );
-    pthread_mutex_lock( &client_list_mutex );
+void renderAddressesToFILE( void * inContext, void * inFile ) {
+    client_context_t * context = (client_context_t *)inContext;
+    FILE * stream = (FILE *)inFile;
 
-    struct list_element *iter;
-    for (iter = client_list->head; iter != NULL; iter = iter->next) {
-        client_context_t * context = (client_context_t *)iter->data;
-
-        //if( context->state != GNW_STATE_ZOMBIE ) {
-            char state_str[32] = {0};
-            switch (context->state) {
-                case GNW_STATE_OPEN:
-                    sprintf(state_str, "OPEN");
-                    break;
-                case GNW_STATE_RUN:
-                    sprintf(state_str, "RUN");
-                    break;
-                case GNW_STATE_CLOSE:
-                    sprintf(state_str, "CLOSE");
-                    break;
-                case GNW_STATE_ZOMBIE:
-                    sprintf(state_str, "ZOMBIE");
-                    break;
-                default:
-                    sprintf(state_str, "???");
-            }
-
-            char policy_str[32] = {0};
-            /*switch (context->link_policy) {
-                case GNW_POLICY_BROADCAST:
-                    sprintf(policy_str, "BROADCAST");
-                    break;
-                case GNW_POLICY_ANYCAST:
-                    sprintf(policy_str, "ANYCAST");
-                    break;
-                case GNW_POLICY_ROUNDROBIN:
-                    sprintf(policy_str, "ROUNDROBIN");
-                    break;
-                default:
-                    sprintf(policy_str, "???");
-            }*/
-
-            char *out_suffix = NULL;
-            double scaled_bytes_out = fmt_iec_size(context->bytes_out, &out_suffix);
-
-            char *in_suffix = NULL;
-            double scaled_bytes_in = fmt_iec_size(context->bytes_in, &in_suffix);
-
-            fprintf(stream, "%012lx |%10s |%10.2f %3s |%10.2f %3s |%10s |",
-                    context->address,
-                    state_str,
-                    scaled_bytes_in,
-                    in_suffix,
-                    scaled_bytes_out,
-                    out_suffix,
-                    policy_str);
-
-            /*for (int i = 0; i < GNW_MAX_LINKS; i++) {
-                if (context->links[i] != NULL)
-                    fprintf(stream, "%lu ", context->links[i]->address);
-            }*/
-            fprintf(stream, "\n");
-        //}
+    //if( context->state != GNW_STATE_ZOMBIE ) {
+    char state_str[32] = {0};
+    switch (context->state) {
+        case GNW_STATE_OPEN:
+            sprintf(state_str, "OPEN");
+            break;
+        case GNW_STATE_RUN:
+            sprintf(state_str, "RUN");
+            break;
+        case GNW_STATE_CLOSE:
+            sprintf(state_str, "CLOSE");
+            break;
+        case GNW_STATE_ZOMBIE:
+            sprintf(state_str, "ZOMBIE");
+            break;
+        default:
+            sprintf(state_str, "???");
     }
-    pthread_mutex_unlock( &client_list_mutex );
+
+    char policy_str[32] = {0};
+    switch (context->link_policy) {
+        case GNW_POLICY_BROADCAST:
+            sprintf(policy_str, "BROADCAST");
+            break;
+        case GNW_POLICY_ANYCAST:
+            sprintf(policy_str, "ANYCAST");
+            break;
+        case GNW_POLICY_ROUNDROBIN:
+            sprintf(policy_str, "ROUNDROBIN");
+            break;
+        default:
+            sprintf(policy_str, "???");
+    }
+
+    char *out_suffix = NULL;
+    double scaled_bytes_out = fmt_iec_size(context->bytes_out, &out_suffix);
+
+    char *in_suffix = NULL;
+    double scaled_bytes_in = fmt_iec_size(context->bytes_in, &in_suffix);
+
+    fprintf(stream, "%08lx |%10s |%10.2f %3s |%10.2f %3s |%10s | ",
+            context->address,
+            state_str,
+            scaled_bytes_in,
+            in_suffix,
+            scaled_bytes_out,
+            out_suffix,
+            policy_str);
+
+    sink_t * iter = context->links;
+    while( iter != NULL ) {
+        client_context_t * remote = iter->target_context;
+        if( remote != NULL )
+            fprintf( stream, "%08x, ", remote->address );
+        else
+            fprintf( stream, "NULL, " );
+        iter = iter->next;
+    }
+
+    fprintf(stream, "\n");
+}
+
+void emitStatistics( FILE * stream ) {
+    fprintf( stream, "UID      | State     | In            | Out           | Policy    | Links\n" );
+
+    pthread_mutex_lock( &table_address_mutex );
+    address_trie_walk( table_address, &renderAddressesToFILE, stream );
+    pthread_mutex_unlock( &table_address_mutex );
+
     fprintf( stream, "\n" );
 }
 
 client_context_t * findByAddress( gnw_address_t address ) {
-    pthread_mutex_lock(&client_list_mutex);
-    bool done = false;
-    struct list_element *iter = client_list->head;
-    while (iter != NULL && !done) {
-        client_context_t *context = (client_context_t *) iter->data;
+    pthread_mutex_lock(&table_address_mutex);
+    client_context_t * context = (client_context_t *)address_trie_find( table_address, address, 0 );
+    pthread_mutex_unlock(&table_address_mutex);
 
-        if (context->address == address) {
-            done = true;
-            break;
-        }
-        iter = iter->next;
-    }
-    if( iter == NULL ) {
-        pthread_mutex_unlock(&client_list_mutex);
-        return NULL;
-    }
-
-    client_context_t * data_ptr = iter->data;
-    pthread_mutex_unlock(&client_list_mutex);
-
-    return data_ptr;
+    return context;
 }
 
 void context_cleanup( client_context_t * context ) {
@@ -305,47 +293,69 @@ void * clientProcess( void * _context ) {
             switch( packet_header->type ) {
                 case GNW_DATA:
 
-                    /*switch( context->link_policy ) {
-                        case GNW_POLICY_BROADCAST:
-                            for( int i=0; i<GNW_MAX_LINKS; i++ ) {
-                                if( context->links[i] != NULL ) {
-                                    gnw_emitDataPacket(context->links[i]->socket_fd, context->address, packet_payload, packet_header->length);
-                                    context->bytes_out += packet_header->length;
-                                    context->packets_out++;
-                                    context->links[i]->bytes_in += packet_header->length;
-                                    context->links[i]->packets_in++;
-                                }
+                    // Fast exit, if there are no links associated with this node
+                    if( context->links == NULL )
+                        break;
+
+                    switch( context->link_policy ) {
+                        case GNW_POLICY_BROADCAST: {
+                            sink_t *iter = context->links;
+                            while (iter != NULL) {
+                                client_context_t *remote = iter->target_context;
+                                gnw_emitDataPacket(remote->socket_fd, context->address, packet_payload,
+                                                   packet_header->length);
+                                context->bytes_out += packet_header->length;
+                                context->packets_out++;
+                                remote->bytes_in += packet_header->length;
+                                remote->packets_in++;
+
+                                iter = iter->next;
                             }
                             break;
+                        }
 
                         case GNW_POLICY_ANYCAST: {
-                            int offset = rand() % GNW_MAX_LINKS; // FIXME: This looks super non-uniform distribution! Is there a de-facto version of Anycast selection?
-                            while (context->links[offset] == NULL) {
-                                offset = (offset + 1) % GNW_MAX_LINKS;
+                            client_context_t * remote = context->links->target_context;
+                            sink_t * iter = context->links;
+                            for( int probability = 2; iter != NULL; probability++ ) {
+                                if( rand() % probability == 0 )
+                                    remote = iter->target_context;
+                                iter = iter->next;
                             }
 
-                            gnw_emitDataPacket(context->links[offset]->socket_fd, context->address, packet_payload, packet_header->length);
-                            context->bytes_out += packet_header->length;
-                            context->packets_out++;
-                            context->links[offset]->bytes_in += packet_header->length;
-                            context->links[offset]->packets_in++;
+                            // Guard against
+                            if( remote != NULL ) {
+                                gnw_emitDataPacket(remote->socket_fd, context->address, packet_payload,
+                                                   packet_header->length);
+                                context->bytes_out += packet_header->length;
+                                context->packets_out++;
+                                remote->bytes_in += packet_header->length;
+                                remote->packets_in++;
+                            }
 
                             break;
                         }
 
                         case GNW_POLICY_ROUNDROBIN:
-                            context->roundrobin_index = (context->roundrobin_index + 1) % GNW_MAX_LINKS;
-                            while( context->links[context->roundrobin_index] == NULL )
-                                context->roundrobin_index = (context->roundrobin_index + 1) % GNW_MAX_LINKS;
+                            if( context->roundrobin_iter == NULL )
+                                context->roundrobin_iter = context->links;
 
-                            gnw_emitDataPacket(context->links[context->roundrobin_index]->socket_fd, context->address, packet_payload, packet_header->length);
+                            // Just bail if we don't have anything to work with
+                            if( context->roundrobin_iter == NULL )
+                                break;
+
+                            client_context_t * remote = context->roundrobin_iter->target_context;
+
+                            gnw_emitDataPacket(remote->socket_fd, context->address, packet_payload, packet_header->length);
                             context->bytes_out += packet_header->length;
                             context->packets_out++;
-                            context->links[context->roundrobin_index]->bytes_in += packet_header->length;
-                            context->links[context->roundrobin_index]->packets_in++;
+                            remote->bytes_in += packet_header->length;
+                            remote->packets_in++;
+
+                            context->roundrobin_iter = context->roundrobin_iter->next;
 
                             break;
-                    }*/
+                    }
 
                     break;
 
@@ -360,10 +370,13 @@ void * clientProcess( void * _context ) {
                         case GNW_CMD_NEW_ADDRESS:
                             fprintf( stdout, "%s\tAddress request.\n", clientAddress );
 
-                            unsigned char replyBuffer[ sizeof(gnw_address_t) + 1 ];
-                            replyBuffer[0] = GNW_CMD_NEW_ADDRESS;
-                            *((gnw_address_t *)(replyBuffer+1)) = context->address;
-                            gnw_emitCommandPacket( context->socket_fd, GNW_COMMAND | GNW_REPLY, replyBuffer, sizeof(gnw_address_t) );
+                            unsigned char * replyBuffer = malloc( sizeof(gnw_address_t) + 1 );
+                            *replyBuffer = GNW_CMD_NEW_ADDRESS;
+                            gnw_address_t * payload = (gnw_address_t *)(replyBuffer + 1);
+                            *payload = context->address;
+                            gnw_emitCommandPacket( context->socket_fd, GNW_COMMAND | GNW_REPLY, replyBuffer, sizeof(gnw_address_t)+1 );
+
+                            free( replyBuffer );
 
                             // Going live (run state)
                             context->state = GNW_STATE_RUN;
@@ -389,14 +402,16 @@ void * clientProcess( void * _context ) {
                                 break;
                             }
 
+                            fprintf( stdout, "%s\tTarget: %08x\n", clientAddress, target );
+
                             client_context_t * node = findByAddress( target );
                             if( node == NULL ) {
                                 fprintf( stderr, "No such valid address -> %lx\n", target );
                                 break;
                             }
-                            /*fprintf(stdout, "%lx policy changed from %d to %d\n", target, node->link_policy,
+                            fprintf(stdout, "%lx policy changed from %d to %d\n", target, node->link_policy,
                                     newPolicy);
-                            node->link_policy = newPolicy;*/
+                            node->link_policy = newPolicy;
 
                             break;
                         }
@@ -408,26 +423,33 @@ void * clientProcess( void * _context ) {
                             gnw_address_t source_address = *(gnw_address_t *)(packet_payload+1);
                             gnw_address_t target_address = *(gnw_address_t *)(packet_payload+1+sizeof(gnw_address_t));
 
-                            fprintf( stdout, "%d -> %d\n", source_address, target_address );
+                            fprintf( stdout, "%x -> %x\n", source_address, target_address );
 
+                            // Try to grab the source context, if any
                             client_context_t * source = findByAddress( source_address );
                             if( source == NULL ) {
                                 fprintf( stderr, "No such valid source address -> %lx\n", source_address );
                                 break;
                             }
 
+                            // Try to grab the target context, if any
                             client_context_t * target = findByAddress( target_address );
                             if( target == NULL ) {
                                 fprintf( stderr, "No such valid target address -> %lx\n", target_address );
                                 break;
                             }
 
-                            /*for( int i=0; i<10; i++ ) {
-                                if( source->links[i] == NULL ) {
-                                    source->links[i] = target;
-                                    break;
-                                }
-                            }*/
+                            sink_t * newSink = malloc( sizeof(sink_t) );
+                            newSink->target_context = target;
+                            newSink->next = NULL;
+
+                            // Prepend to the sink list
+                            if( source->links == NULL ) {
+                                source->links = newSink;
+                            } else {
+                                newSink->next = source->links;
+                                source->links = newSink;
+                            }
 
                             break;
 
@@ -481,9 +503,9 @@ int router_process() {
         exit( EXIT_FAILURE );
     }
 
-    // Set up the client list
-    client_list = ll_create();
-    pthread_mutex_init( &client_list_mutex, NULL );
+    // Set up the address and forward tables
+    table_address = address_trie_init();
+    pthread_mutex_init( &table_address_mutex, NULL );
 
     // Begin running the status process (maybe this should become a watchdog in the future?)
     printf( "STATUS CREATE\n" );
@@ -506,14 +528,16 @@ int router_process() {
         memset(new_context, 0, sizeof(client_context_t));
         new_context->thread_state = malloc(sizeof(pthread_t));
         new_context->socket_fd = remote_fd;
-        new_context->address = nextAddress += 0x1000;
+        new_context->address = (++nextNodeAddress) << 8;
 
         //new_context->routes = malloc( sizeof(link_t) );
         //new_context->routes->source = new_context->address;
         //new_context->routes->policy = GNW_POLICY_BROADCAST;
 
-        pthread_mutex_lock(&client_list_mutex);
-        ll_append( client_list, new_context );
+        // Lock & Load the new context
+        pthread_mutex_lock(&table_address_mutex);
+        address_trie_put( table_address, new_context, new_context->address, 0 );
+        pthread_mutex_unlock(&table_address_mutex);
 
         // While we have the lock, go find any dead processes
         /*struct list_element * prev = NULL;
@@ -536,8 +560,6 @@ int router_process() {
             iter = iter->next;
             prev = iter;
         }*/
-
-        pthread_mutex_unlock(&client_list_mutex);
 
         int result = pthread_create( new_context->thread_state, NULL, clientProcess, new_context );
         assert( !result, "Could not create a new child process!" );

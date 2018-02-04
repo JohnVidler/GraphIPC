@@ -128,6 +128,17 @@ void * address_trie_find( address_trie_t ** root, gnw_address_t address, unsigne
     return NULL;
 }
 
+void address_trie_walk( address_trie_t ** root, void(*iter)(void *, void *), void * passthrough ) {
+    for( int i=0; i<256; i++ ) {
+        if (root[i] != NULL && root[i]->context != NULL) {
+            if( root[i]->next != NULL )
+                address_trie_walk( root[i]->next, iter, passthrough );
+            else
+                iter( root[i]->context, passthrough );
+        }
+    }
+}
+
 void address_trie_dump( address_trie_t ** root, unsigned int indent ) {
     for( int i=0; i<256; i++ ) {
         if ( root[i] != NULL && root[i]->context != NULL ) {
