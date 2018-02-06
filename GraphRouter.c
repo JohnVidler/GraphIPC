@@ -184,6 +184,8 @@ void emitStatistics( FILE * stream ) {
 
     pthread_mutex_lock( &table_address_mutex );
     address_trie_walk( table_address, &renderAddressesToFILE, stream );
+    printf( "Trie Dump\n" );
+    address_trie_dump( table_address, 0 );
     pthread_mutex_unlock( &table_address_mutex );
 
     fprintf( stream, "\n" );
@@ -202,8 +204,14 @@ void context_cleanup( client_context_t * context ) {
     close( context->socket_fd );
     ringbuffer_destroy( context->rx_buffer );
 
-    // Become zombie, ask to be cleaned up.
+    // Become zombie, in case cleanup fails
     context->state = GNW_STATE_ZOMBIE;
+
+    pthread_mutex_lock( &table_address_mutex );
+    address_trie_remove( table_address, context->address, 0 );
+    pthread_mutex_unlock( &table_address_mutex );
+
+    free( context );
 }
 
 void * clientProcess( void * _context ) {
@@ -370,6 +378,30 @@ void * clientProcess( void * _context ) {
                         case GNW_CMD_NEW_ADDRESS:
                             fprintf( stdout, "%s\tAddress request.\n", clientAddress );
 
+                            if( packet_header->length != 1 ) {
+                                gnw_address_t * reqAddress = (gnw_address_t *)(packet_payload+1);
+                                gnw_address_t nodeMask = (~(unsigned)0) ^ (unsigned)0xFF;
+
+                                if( (*reqAddress & nodeMask) == *reqAddress ) {
+                                    fprintf(stdout, "%s\tNode requested a specific address (%08x), checking availability\n", clientAddress, *reqAddress);
+
+                                    pthread_mutex_lock(&table_address_mutex);
+                                    void *testContext = address_trie_find(table_address, *reqAddress, 0);
+                                    if (testContext == NULL) {
+                                        fprintf(stdout, "%s\tAddress is available! Claiming!\n", clientAddress);
+                                        address_trie_remove(table_address, context->address, 0);   // Remove the old address
+                                        context->address = *reqAddress;                            // Update the internal values
+                                        gnw_format_address(clientAddress, context->address);
+                                        address_trie_put(table_address, context, context->address, 0); // Push the new structure
+                                    } else {
+                                        fprintf(stdout, "%s\tAddress is in use - refusing the claim.\n", clientAddress);
+                                    }
+                                    pthread_mutex_unlock(&table_address_mutex);
+                                }
+                                else {
+                                    fprintf( stdout, "%s\tBad request address - node addresses cannot be non-zero in the last octet!\n", clientAddress );
+                                }
+                            }
                             unsigned char * replyBuffer = malloc( sizeof(gnw_address_t) + 1 );
                             *replyBuffer = GNW_CMD_NEW_ADDRESS;
                             gnw_address_t * payload = (gnw_address_t *)(replyBuffer + 1);
@@ -481,7 +513,7 @@ void * status_process( void * notused ) {
     while( config.system_state ) {
         emitStatistics( stdout );
 
-        sleep( 5 );
+        sleep( 1 );
     }
 }
 
@@ -528,38 +560,18 @@ int router_process() {
         memset(new_context, 0, sizeof(client_context_t));
         new_context->thread_state = malloc(sizeof(pthread_t));
         new_context->socket_fd = remote_fd;
-        new_context->address = (++nextNodeAddress) << 8;
-
-        //new_context->routes = malloc( sizeof(link_t) );
-        //new_context->routes->source = new_context->address;
-        //new_context->routes->policy = GNW_POLICY_BROADCAST;
 
         // Lock & Load the new context
         pthread_mutex_lock(&table_address_mutex);
+
+        // Find a spare address slot
+        do {
+            new_context->address = (++nextNodeAddress) << 8;
+            fprintf( stdout, "Trying address %08x...\n", new_context->address );
+        } while( address_trie_find( table_address, new_context->address, 0 ) != NULL );
+
         address_trie_put( table_address, new_context, new_context->address, 0 );
         pthread_mutex_unlock(&table_address_mutex);
-
-        // While we have the lock, go find any dead processes
-        /*struct list_element * prev = NULL;
-        struct list_element * iter = client_list->head;
-        while( iter != NULL ) {
-            if( ((client_context_t *)iter->data)->state == GNW_STATE_ZOMBIE ) {
-                printf( "Removing %lx\n", ((client_context_t *)iter->data)->address );
-                if( prev == NULL )
-                    client_list->head = iter->next;
-                else
-                    prev->next = iter->next;
-
-                struct list_element * next = iter->next;
-                free( iter->data );
-                free( iter );
-
-                iter = next;
-                continue;
-            }
-            iter = iter->next;
-            prev = iter;
-        }*/
 
         int result = pthread_create( new_context->thread_state, NULL, clientProcess, new_context );
         assert( !result, "Could not create a new child process!" );

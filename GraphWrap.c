@@ -57,7 +57,9 @@ struct _configuration {
 
     char *        arg_host;
     char *        arg_port;
+    gnw_address_t arg_address;
     bool          arg_immediate;
+    unsigned int  arg_verbosity;
 };
 struct _configuration config;
 
@@ -88,12 +90,20 @@ int getRouterFD() {
         while( config.graph_address == 0 ) {
             // Ask for an address
             fprintf( stderr, "Requesting an address from the router...\n" );
-            gnw_sendCommand( router_fd, GNW_CMD_NEW_ADDRESS );
+            if( config.arg_address == 0 ) {
+                gnw_sendCommand(router_fd, GNW_CMD_NEW_ADDRESS);
+            }
+            else {
+                // Bit of a hack - send the requested address with the new address request... Might just be ignored ar the router, though!
+                unsigned char reqBuffer[sizeof(gnw_address_t)+1] = { GNW_CMD_NEW_ADDRESS, 0 };
+                memcpy( reqBuffer+1, &config.arg_address, sizeof(gnw_address_t) );
+                gnw_emitCommandPacket( router_fd, GNW_COMMAND, reqBuffer, sizeof(gnw_address_t) + 1 );
+            }
 
             ssize_t bytesRead = read( router_fd, iBuffer, config.network_mtu );
             if( bytesRead <= 0 ) {
-                fprintf( stderr, "IO Error, halting!\n" );
-                return EXIT_FAILURE;
+                fprintf( stderr, "IO Error, halting! (1)\n" );
+                exit( EXIT_FAILURE ); // Hard exit here, as return fails to... well, fail. -John
             }
             if( ringbuffer_write( config.rx_buffer, iBuffer, bytesRead ) != bytesRead )
                 fprintf( stderr, "Buffer overflow! Data loss occurred!" );
@@ -120,7 +130,8 @@ int getRouterFD() {
                                 if( config.graph_address == 0 ) {
                                     config.graph_address = *(gnw_address_t *)(payload + 1);
 
-                                    printf( "?> %x\n", config.graph_address );
+                                    if( config.graph_address != config.arg_address )
+                                        fprintf( stderr, "Router refused our address request, actually got %08x\n", config.graph_address );
 
                                     //config.graph_address = 0xFFFFFFFF & config.graph_address;
                                 }
@@ -210,7 +221,7 @@ int mode_output() {
             ssize_t bytesRead = read( watch_fd[0].fd, buffer, config.network_mtu );
             if( bytesRead <= 0 ) {
                 perror( "read" );
-                fprintf( stderr, "IO Error, halting!\n" );
+                fprintf( stderr, "IO Error, halting! (2)\n" );
                 return EXIT_FAILURE;
             }
             if( ringbuffer_write( config.rx_buffer, buffer, bytesRead ) != bytesRead )
@@ -315,7 +326,8 @@ void * sink_thread( void * _context ) {
 
                     ssize_t bytesRead = read(watch_fd[0].fd, &buffer, config.network_mtu);
 
-                    fprintf( stderr, ">>>\t%s\n", buffer );
+                    if( config.arg_verbosity > 0 )
+                        fprintf( stderr, ">>>\t%s\n", buffer );
 
                     gnw_emitDataPacket( rfd, config.graph_address, buffer, bytesRead ); // Always emit from the node source address, not the stream source address
                 }
@@ -404,12 +416,13 @@ sink_context_t * createNewSink( char * binary, char ** arguments, gnw_address_t 
 #define ARG_USAGE      1
 #define ARG_HOST       2
 #define ARG_PORT       3
-#define ARG_UPSTREAM   4
-#define ARG_DOWNSTREAM 5
-#define ARG_POLICY     6
-#define ARG_INPUT      7
-#define ARG_OUTPUT     8
-#define ARG_IMMEDIATE  9
+#define ARG_ADDRESS    4
+#define ARG_UPSTREAM   5
+#define ARG_DOWNSTREAM 6
+#define ARG_POLICY     7
+#define ARG_INPUT      8
+#define ARG_OUTPUT     9
+#define ARG_IMMEDIATE  10
 
 int main(int argc, char ** argv ) {
     // Configuration defaults
@@ -420,7 +433,9 @@ int main(int argc, char ** argv ) {
     config.arg_host = "127.0.0.1";
     config.arg_port = (char *) ROUTER_PORT;
 
+    config.arg_address = 0;
     config.arg_immediate = false;
+    config.arg_verbosity = 0;
 
     // Check the system MTU and match it - this assumes local operation, for now.
     // Note: Possibly add an override for this in the flags...
@@ -429,11 +444,12 @@ int main(int argc, char ** argv ) {
     if( config.network_mtu > 4096 ) // Excessive copy op.
         config.network_mtu = 1024;
 
-    struct option longOptions[11] = {
+    struct option longOptions[12] = {
             [ARG_HELP]       = { .name="help",       .has_arg=no_argument,       .flag=NULL },
             [ARG_USAGE]      = { .name="usage",      .has_arg=no_argument,       .flag=NULL },
             [ARG_HOST]       = { .name="host",       .has_arg=required_argument, .flag=NULL },
             [ARG_PORT]       = { .name="port",       .has_arg=required_argument, .flag=NULL },
+            [ARG_ADDRESS]    = { .name="address",    .has_arg=required_argument, .flag=NULL },
             [ARG_UPSTREAM]   = { .name="upstream",   .has_arg=required_argument, .flag=NULL },
             [ARG_DOWNSTREAM] = { .name="downstream", .has_arg=required_argument, .flag=NULL },
             [ARG_POLICY]     = { .name="policy",     .has_arg=required_argument, .flag=NULL },
@@ -446,7 +462,7 @@ int main(int argc, char ** argv ) {
     // Argument Parsing //
     int arg;
     int indexPtr = 0;
-    while ((arg = getopt_long(argc, argv, "u:d:p:h:io", longOptions, &indexPtr)) != -1) {
+    while ((arg = getopt_long(argc, argv, "u:d:p:h:a:iov", longOptions, &indexPtr)) != -1) {
 
         // If we have a short arg, pass it over to the long arg index.
         // Note: This will work assuming we have less than 65(?) long arguments... I think -John.
@@ -462,10 +478,12 @@ int main(int argc, char ** argv ) {
                 printf( ANSI_COLOR_CYAN "--help --usage\n" ANSI_COLOR_RESET "\tShow this help message\n\n" );
                 printf( ANSI_COLOR_CYAN "-h --host [host address]\n" ANSI_COLOR_RESET "\tGraphRouter host address\n\n" );
                 printf( ANSI_COLOR_CYAN "-p --port [port]\n" ANSI_COLOR_RESET "\tGraphRouter port\n\n" );
+                printf( ANSI_COLOR_CYAN "-a --address [hex address]\n" ANSI_COLOR_RESET "\tThe (requested) hexadecimal node address, may not be respected by the router. Cannot be 0\n\n" );
                 printf( ANSI_COLOR_CYAN "-u --upstream [graph address]\n" ANSI_COLOR_RESET "\tConnect this node to the upstream address (receive data from this address).\n\tThis argument can be repeated\n\n" );
                 printf( ANSI_COLOR_CYAN "-d --downstream [graph address]\n" ANSI_COLOR_RESET "\tConnect this node to the downstream address (send data to this address).\n\tThis argument can be repeated\n\n" );
                 printf( ANSI_COLOR_CYAN "--policy [broadcast|anycast|roundrobin]\n" ANSI_COLOR_RESET "\tSet the forward policy for this node\n\n" );
                 printf( ANSI_COLOR_CYAN "--immediate\n" ANSI_COLOR_RESET "\tStart running the inner binary immediately. By default wrapped processes are only started on demand when data arrives\n\n" );
+                printf( ANSI_COLOR_CYAN "-v\n" ANSI_COLOR_RESET "\tIncrease verbosity, repeat for increasing levels of detail\n\n" );
                 printf( ANSI_COLOR_CYAN "--\n" ANSI_COLOR_RESET "\tOptional separator between GraphWrap arguments and the inner binary\n\n" );
                 printf( "The first non-flag argument to this binary will be used as the inner process to wrap.\nAny subsequent arguments are then passed to the inner binary.\n\n" );
                 printf( "Example:\n\tGraphWrap -d 2 -u 1 -- innerProcess --processArg1 -processArg2\n" );
@@ -479,6 +497,11 @@ int main(int argc, char ** argv ) {
             case 'p':
             case ARG_PORT:
                 config.arg_port = optarg;
+                break;
+
+            case 'a':
+            case ARG_ADDRESS:
+                config.arg_address = (gnw_address_t)strtoul( optarg, NULL, 16 );
                 break;
 
             case 'u':
@@ -543,6 +566,10 @@ int main(int argc, char ** argv ) {
 
             case ARG_IMMEDIATE:
                 config.arg_immediate = true;
+                break;
+
+            case 'v':
+                config.arg_verbosity++;
                 break;
 
             default:
@@ -629,7 +656,8 @@ int main(int argc, char ** argv ) {
 
                         *(payload + header->length) = '\0'; // Kludge?
 
-                        fprintf( stderr, "<<<\t%d B\t%s\n", header->length, payload );
+                        if( config.arg_verbosity > 0 )
+                            fprintf( stderr, "<<<\t%d B\t%s\n", header->length, payload );
 
                         // By now, we should always have a valid sink context to work with.
                         if( write( PIPE_WRITE(sink_context->wrap_stdin), payload, header->length ) != header->length )

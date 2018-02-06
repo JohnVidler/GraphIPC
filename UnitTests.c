@@ -25,6 +25,7 @@
 #include "lib/GraphNetwork.h"
 #include "lib/utility.h"
 #include "lib/AddressTrie.h"
+#include "lib/BTree.h"
 #include <arpa/inet.h>
 
 void test_ring_buffer() {
@@ -121,10 +122,6 @@ void test_utility_functions() {
     }
 }
 
-void test_forward_table() {
-
-}
-
 void printBits(size_t const size, void const * const ptr)
 {
     unsigned char *b = (unsigned char*) ptr;
@@ -140,21 +137,6 @@ void printBits(size_t const size, void const * const ptr)
         }
     }
     puts("");
-}
-
-// call this function to start a nanosecond-resolution timer
-struct timespec timer_start(){
-    struct timespec start_time;
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start_time);
-    return start_time;
-}
-
-// call this function to end a timer, returning nanoseconds elapsed as a long
-long timer_end(struct timespec start_time){
-    struct timespec end_time;
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end_time);
-    long diffInNanos = end_time.tv_nsec - start_time.tv_nsec;
-    return diffInNanos;
 }
 
 void test_byteTrie() {
@@ -173,23 +155,59 @@ void test_byteTrie() {
 
     // Kill the outer table. Kinda has to be manual for now
     free( table );
+}
 
-    /*printf( "Running queries...\n" );
-    long long sum = 0;
-
-    for( int run=0; run<10000; run++) {
-        struct timespec start_time = timer_start();
-        for (int i = 0; i < 20; i++) {
-            gnw_address_t target = (gnw_address_t) (rand() % 0xffffff);
-            void *tmp = address_trie_find(table, target, 0);
-            assert(tmp != NULL, "Failed to find an address!");
-        }
-        long nanotime = timer_end(start_time) / 20;
-        //printf( "%d,%ld\n", run, nanotime );
-        sum += nanotime;
+void btree_walk( btree_node_t * root ) {
+    if( root == NULL ) {
+        printf( "∅" );
+        return;
     }
 
-    printf("Average time ~%ld ns\n", sum/10000);*/
+    printf( "%u{", root->key );
+    btree_walk( root->lt );
+    printf( "," );
+    btree_walk( root->gt );
+    printf( "}" );
+}
+
+void test_btree() {
+    btree_node_t * root = btree_init();
+    assert( root != NULL, "Root was not created successfully (OOM Error?)" );
+    assert( root->lt == NULL, "LT was not NULL" );
+    assert( root->gt == NULL, "GT was not NULL" );
+    assert( root->key == 0, "Key was not zero" );
+    assert( root->value == NULL, "Value was not NULL" );
+
+    /*for( uint32_t index = 0; index<10; index++) {
+        unsigned char * tmp = malloc( 1 );
+        *tmp = (unsigned char) (index % 0xff);
+        assert( btree_put( root, index, tmp ) != NULL, "Failed to insert a value into the B-Tree" );
+    }*/
+
+    /*for( uint32_t index = 0; index<10; index++) {
+        unsigned char * ret = btree_get( root, index );
+        assert( *ret == (unsigned char)( index % 0xff ), "Returned value did not match expected result! B-Tree corruption!" );
+        assert( btree_remove( root, index ) == ret, "Remove returned differing value pointer? B-Tree corruption!" );
+
+        free( ret );
+    }*/
+
+    char * tmp = malloc( 1 );
+
+    uint32_t lookup[] = { 10, 2, 5, 3 };
+    for( uint32_t i=0; i<4; i++ ) {
+        uint32_t address = lookup[i];
+        btree_put(root, address, tmp);
+
+        printf("+%u -> ", address); btree_walk(root); printf("\n");
+    }
+
+    for( uint32_t i=0; i<4; i++ ) {
+        uint32_t address = lookup[i];
+        btree_remove(root, address);
+
+        printf("-%u -> ", address); btree_walk(root); printf("\n");
+    }
 }
 
 int main(int argc, char * argv ) {
@@ -198,13 +216,12 @@ int main(int argc, char * argv ) {
     setExitOnAssert( true );
 
     //test_ring_buffer();
-    test_byteTrie();
+    //test_byteTrie();
+    test_btree();
 
     //test_network_sync();
 
     //test_utility_functions();
-
-    //test_forward_table();
 
     return EXIT_SUCCESS;
 }

@@ -23,6 +23,7 @@
 #include "GraphNetwork.h"
 
 const uint32_t mask_lookup_table[4];
+const uint32_t bit_mask_table[33];
 
 typedef struct address_trie {
     gnw_address_t address;
