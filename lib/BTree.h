@@ -22,11 +22,15 @@
 typedef struct btree_node {
     uint32_t key;
     void * value;
+    struct btree_node * parent;
     struct btree_node * lt;
     struct btree_node * gt;
 } btree_node_t;
 
-btree_node_t * btree_init();
+btree_node_t * rotate_lt( btree_node_t * node );
+btree_node_t * rotate_gt( btree_node_t * node );
+
+btree_node_t * btree_init( btree_node_t * parent );
 btree_node_t * btree_put( btree_node_t * root, uint32_t key, void * value );
 void * btree_get( btree_node_t * root, uint32_t key );
 void * btree_remove( btree_node_t * root, uint32_t key );

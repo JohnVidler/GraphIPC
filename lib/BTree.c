@@ -17,16 +17,57 @@
  */
 #include "BTree.h"
 #include <stdlib.h>
-#include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
-btree_node_t * btree_init() {
+btree_node_t * rotate_lt( btree_node_t * node ) {
+    if( node->gt != NULL ) {
+
+        if( node->gt->lt != NULL ) {
+            node->gt->parent = node->parent;
+            node->gt->lt->lt = node;
+            node->parent = node->gt->lt;
+            node->gt = NULL;
+
+            return node->parent->parent;
+        }
+
+        node = node->gt;
+        node->lt = node->parent;
+        node->parent = node->parent->parent;
+        node->lt->parent = node;
+        node->lt->gt = NULL;
+    }
+
+    return node;
+}
+
+btree_node_t * rotate_gt( btree_node_t * node ) {
+    if( node->lt != NULL ) {
+
+        if( node->lt->gt != NULL ) {
+            node->lt->parent = node->parent;
+            node->lt->gt->gt = node;
+            node->parent = node->lt->gt;
+            node->lt = NULL;
+
+            return node->parent->parent;
+        }
+
+        node = node->lt;
+        node->gt = node->parent;
+        node->parent = node->parent->parent;
+        node->gt->parent = node;
+        node->gt->lt = NULL;
+    }
+
+    return node;
+}
+
+btree_node_t * btree_init( btree_node_t * parent ) {
     btree_node_t * root = malloc( sizeof(btree_node_t) );
-    root->lt = NULL;
-    root->gt = NULL;
-    root->key = 0;
-    root->value = NULL;
-
+    memset( root, 0, sizeof(btree_node_t) );
+    root->parent = parent;
     return root;
 }
 
@@ -50,7 +91,7 @@ btree_node_t * btree_put( btree_node_t * root, uint32_t key, void * value ) {
 
         // There's nowhere to recurse to
         if( root->lt == NULL ) {
-            root->lt = btree_init();
+            root->lt = btree_init( root );
             return btree_put( root->lt, key, value );
         }
 
@@ -58,7 +99,7 @@ btree_node_t * btree_put( btree_node_t * root, uint32_t key, void * value ) {
         if( key > root->lt->key ) {
             // If we have a NULL greater than branch, copy root over and insert the new key here.
             if( root->gt == NULL ) {
-                root->gt = btree_init();
+                root->gt = btree_init( root );
                 root->gt->key = root->key;
                 root->gt->value = root->value;
                 root->key = key;
@@ -75,7 +116,7 @@ btree_node_t * btree_put( btree_node_t * root, uint32_t key, void * value ) {
     if( key > root->key ) {
         // If there's nowhere to recurse to...
         if (root->gt == NULL) {
-            root->gt = btree_init();
+            root->gt = btree_init( root );
             return btree_put(root->gt, key, value);
         }
 
@@ -83,7 +124,7 @@ btree_node_t * btree_put( btree_node_t * root, uint32_t key, void * value ) {
         if (key < root->gt->key) {
             // If we have a NULL less than branch, copy root over and insert the new key here.
             if( root->lt == NULL ) {
-                root->lt = btree_init();
+                root->lt = btree_init( root );
                 root->lt->key = root->key;
                 root->gt->value = root->value;
                 root->key = key;

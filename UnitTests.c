@@ -26,6 +26,7 @@
 #include "lib/utility.h"
 #include "lib/AddressTrie.h"
 #include "lib/BTree.h"
+#include "lib/avl.h"
 #include <arpa/inet.h>
 
 void test_ring_buffer() {
@@ -157,57 +158,79 @@ void test_byteTrie() {
     free( table );
 }
 
-void btree_walk( btree_node_t * root ) {
+
+void printIndent( unsigned int depth, const char * indent ) {
+    while( depth-- > 0 )
+        printf( "%s", indent );
+}
+
+void btree_walk( btree_node_t * root, unsigned int depth ) {
     if( root == NULL ) {
         printf( "∅" );
         return;
     }
 
     printf( "%u{", root->key );
-    btree_walk( root->lt );
+    btree_walk( root->lt, depth+1 );
+    printf( ", " );
+    btree_walk( root->gt, depth+1 );
+    printf( "}" );
+}
+
+typedef struct dummy {
+    uint32_t address;
+} dummy_t;
+
+void avl_to_dot( FILE * stream, struct avl_node * node ) {
+    fprintf( stream, "node_%u [label=\"%d\"];\n", ((dummy_t *)node->avl_data)->address, ((dummy_t *)node->avl_data)->address );
+    if( node->avl_link[0] != NULL ) {
+        fprintf( stream, "node_%u -> node_%u [label=\" lt\"];\n", ((dummy_t *)node->avl_data)->address, ((dummy_t *)node->avl_link[0]->avl_data)->address );
+        avl_to_dot( stream, node->avl_link[0] );
+    }
+    if( node->avl_link[1] != NULL ) {
+        fprintf( stream, "node_%u -> node_%u [label=\" gt\"];\n", ((dummy_t *)node->avl_data)->address, ((dummy_t *)node->avl_link[1]->avl_data)->address );
+        avl_to_dot( stream, node->avl_link[1] );
+    }
+}
+
+int avl_index_comparitor ( const void *avl_a, const void *avl_b, void *avl_param ) {
+    dummy_t * a = (dummy_t *)avl_a;
+    dummy_t * b = (dummy_t *)avl_b;
+    return a->address - b->address;
+}
+
+void print_tree_structure (struct avl_node *node)
+{
+    if( node == NULL ) {
+        printf( "∅" );
+        return;
+    }
+
+    printf( "%u{", ((dummy_t *)node->avl_data)->address );
+    print_tree_structure( node->avl_link[0] );
     printf( "," );
-    btree_walk( root->gt );
+    print_tree_structure( node->avl_link[1] );
     printf( "}" );
 }
 
 void test_btree() {
-    btree_node_t * root = btree_init();
-    assert( root != NULL, "Root was not created successfully (OOM Error?)" );
-    assert( root->lt == NULL, "LT was not NULL" );
-    assert( root->gt == NULL, "GT was not NULL" );
-    assert( root->key == 0, "Key was not zero" );
-    assert( root->value == NULL, "Value was not NULL" );
+    struct avl_table * table = avl_create( &avl_index_comparitor, NULL, &avl_allocator_default );
 
-    /*for( uint32_t index = 0; index<10; index++) {
-        unsigned char * tmp = malloc( 1 );
-        *tmp = (unsigned char) (index % 0xff);
-        assert( btree_put( root, index, tmp ) != NULL, "Failed to insert a value into the B-Tree" );
-    }*/
-
-    /*for( uint32_t index = 0; index<10; index++) {
-        unsigned char * ret = btree_get( root, index );
-        assert( *ret == (unsigned char)( index % 0xff ), "Returned value did not match expected result! B-Tree corruption!" );
-        assert( btree_remove( root, index ) == ret, "Remove returned differing value pointer? B-Tree corruption!" );
-
-        free( ret );
-    }*/
-
-    char * tmp = malloc( 1 );
-
-    uint32_t lookup[] = { 10, 2, 5, 3 };
-    for( uint32_t i=0; i<4; i++ ) {
-        uint32_t address = lookup[i];
-        btree_put(root, address, tmp);
-
-        printf("+%u -> ", address); btree_walk(root); printf("\n");
+    for( int i=0; i<10; i++ ) {
+        dummy_t *a = malloc(sizeof(dummy_t));
+        a->address = (uint32_t) i;
+        avl_insert(table, a);
     }
 
-    for( uint32_t i=0; i<4; i++ ) {
-        uint32_t address = lookup[i];
-        btree_remove(root, address);
+    dummy_t query = { .address = 5 };
+    dummy_t * result = avl_find( table, &query );
 
-        printf("-%u -> ", address); btree_walk(root); printf("\n");
-    }
+    printf( "Found: %u\n", result->address );
+
+    //print_tree_structure( table->avl_root );
+
+    avl_to_dot( stdout, table->avl_root );
+
 }
 
 int main(int argc, char * argv ) {

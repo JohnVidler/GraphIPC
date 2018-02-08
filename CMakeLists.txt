@@ -23,7 +23,7 @@ link_directories(${GLIB_LIBRARY_DIRS})
 # Pthreads/Threads stuff
 find_package( Threads )
 
-add_library( DataStructures lib/RingBuffer.c lib/RingBuffer.h lib/LinkedList.c lib/LinkedList.h lib/BTree.c lib/BTree.h)
+add_library( DataStructures lib/RingBuffer.c lib/RingBuffer.h lib/LinkedList.c lib/LinkedList.h lib/BTree.c lib/BTree.h lib/avl.c lib/avl.h)
 add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h lib/AddressTrie.c lib/AddressTrie.h )
 target_link_libraries( GraphNetwork m )
 add_library( Assert lib/Assert.c lib/Assert.h )
