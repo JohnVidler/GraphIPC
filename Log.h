@@ -39,6 +39,7 @@
 void log_setLevel( unsigned int level );
 void log_vwrite( unsigned int level, const char * fmt, va_list args );
 void log_write( unsigned int level, const char * fmt, ... );
+void log_debug( const char * fmt, ... );
 void log_info( const char * fmt, ... );
 void log_warn( const char * fmt, ... );
 void log_error( const char * fmt, ... );

@@ -24,12 +24,15 @@ link_directories(${GLIB_LIBRARY_DIRS})
 find_package( Threads )
 
 add_library( Common Log.c Log.h )
+
 add_library( DataStructures lib/RingBuffer.c lib/RingBuffer.h lib/LinkedList.c lib/LinkedList.h lib/BTree.c lib/BTree.h lib/avl.c lib/avl.h)
-add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h IndexTable.c IndexTable.h)
-target_link_libraries( GraphNetwork m )
+
+add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h IndexTable.c IndexTable.h NodeTable.c NodeTable.h ForwardTable.h ForwardTable.c)
+target_link_libraries( GraphNetwork m DataStructures )
+
 add_library( Assert lib/Assert.c lib/Assert.h )
 
-add_executable( Graph GraphWrap.c lib/utility.c lib/utility.h lib/GraphNetwork.h common.c common.h IndexTable.c IndexTable.h NodeTable.c NodeTable.h)
+add_executable( Graph GraphWrap.c lib/utility.c lib/utility.h lib/GraphNetwork.h common.c common.h )
 target_link_libraries( Graph ${CMAKE_THREAD_LIBS_INIT} Common GraphNetwork DataStructures Assert )
 
 add_executable( GraphRouter GraphRouter.c lib/utility.c lib/utility.h lib/GraphNetwork.h lib/Assert.c lib/Assert.h common.c common.h Log.c Log.h)

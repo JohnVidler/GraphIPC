@@ -15,13 +15,29 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+
 #pragma once
 
 #include "lib/GraphNetwork.h"
-#include "lib/avl.h"
 
-void node_table_init();
-void node_table_add( gnw_address_t address, void * context );
-void * node_table_remove( gnw_address_t address );
-void * node_table_find( gnw_address_t address );
-void node_table_walk( void (*handler)(uint32_t, void *) );
+typedef struct edge {
+    gnw_address_t target;
+    void * context;
+    struct edge * next;
+} edge_t;
+
+typedef struct forward {
+    int forward_policy;
+    edge_t * edgeList;
+    pthread_mutex_t listLock;
+    edge_t * round_robin_ref;
+} forward_t;
+
+void forward_table_init();
+void forward_table_add_edge( gnw_address_t source, gnw_address_t target );
+void forward_table_remove_edge( gnw_address_t source, gnw_address_t target );
+forward_t * forward_table_find( gnw_address_t source );
+void forward_table_remove( gnw_address_t source );
+
+edge_t * forward_table_get_iterator( gnw_address_t source );
+void forward_table_release_iterator( gnw_address_t source );

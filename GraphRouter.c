@@ -28,7 +28,10 @@
 #include "lib/Assert.h"
 #include "common.h"
 #include "lib/LinkedList.h"
-#include "lib/AddressTrie.h"
+#include "IndexTable.h"
+#include "NodeTable.h"
+#include "ForwardTable.h"
+#include "Log.h"
 #include <poll.h>
 #include <sys/un.h>
 #include <getopt.h>
@@ -43,13 +46,10 @@ struct _configuration {
 
 volatile struct _configuration config;
 
-typedef struct sink {
-    void * target_context;
-    struct sink * next;
-} sink_t;
-
-typedef struct client_context {
-    gnw_address_t address;
+/**
+ * Context for a given connection to a running node or subgraph-router.
+ */
+typedef struct {
     pthread_t * thread_state;
     int socket_fd;
     RingBuffer_t * rx_buffer;
@@ -59,18 +59,24 @@ typedef struct client_context {
     uint64_t bytes_in;
     uint64_t bytes_out;
 
-    int link_policy;
-    sink_t * links;
-    sink_t * roundrobin_iter;
-
-} client_context_t;
+} context_t;
 
 // Note: Replace client_list with the address table (table_address)!
 
-address_trie_t ** table_address = NULL;
-pthread_mutex_t table_address_mutex;
-
+linked_list_t    * context_list;
 volatile gnw_address_t nextNodeAddress = 0;
+
+gnw_address_t genNextValidAddress() {
+    nextNodeAddress += 0x1000;
+    while( node_table_find( nextNodeAddress ) != NULL && nextNodeAddress != 0 )
+        nextNodeAddress += 0x1000;
+
+    if( nextNodeAddress == 0 ) {
+        log_write(SEVERE, "Address pool exhaustion! No more addresses!");
+        exit( EXIT_FAILURE ); // Note: this is a really, really bad way to handle this, but it'll save us from bad internal state mangling the output, kinda :|
+    }
+    return nextNodeAddress;
+}
 
 int getListenSocket( struct addrinfo * hints ) {
     int ret;
@@ -113,8 +119,8 @@ int getListenSocket( struct addrinfo * hints ) {
     return sockfd;
 }
 
-void renderAddressesToFILE( void * inContext, void * inFile ) {
-    client_context_t * context = (client_context_t *)inContext;
+/*void renderAddressesToFILE( void * inContext, void * inFile ) {
+    context_t * context = (context_t *)inContext;
     FILE * stream = (FILE *)inFile;
 
     //if( context->state != GNW_STATE_ZOMBIE ) {
@@ -168,7 +174,7 @@ void renderAddressesToFILE( void * inContext, void * inFile ) {
 
     sink_t * iter = context->links;
     while( iter != NULL ) {
-        client_context_t * remote = iter->target_context;
+        context_t * remote = iter->target_context;
         if( remote != NULL )
             fprintf( stream, "%08x, ", remote->address );
         else
@@ -177,29 +183,88 @@ void renderAddressesToFILE( void * inContext, void * inFile ) {
     }
 
     fprintf(stream, "\n");
+}*/
+
+void printDetails( gnw_address_t address, void * data ) {
+    context_t * context = (context_t *)data;
+
+    char state_str[32] = {0};
+    switch (context->state) {
+        case GNW_STATE_OPEN:
+            sprintf(state_str, "OPEN");
+            break;
+        case GNW_STATE_RUN:
+            sprintf(state_str, "RUN");
+            break;
+        case GNW_STATE_CLOSE:
+            sprintf(state_str, "CLOSE");
+            break;
+        case GNW_STATE_ZOMBIE:
+            sprintf(state_str, "ZOMBIE");
+            break;
+        default:
+            sprintf(state_str, "???");
+    }
+
+    forward_t * forward = forward_table_find( address );
+
+    char policy_str[32] = {0};
+    if( forward != NULL ) {
+        switch (forward->forward_policy) {
+            case GNW_POLICY_BROADCAST:
+                sprintf(policy_str, "BROADCAST");
+                break;
+            case GNW_POLICY_ANYCAST:
+                sprintf(policy_str, "ANYCAST");
+                break;
+            case GNW_POLICY_ROUNDROBIN:
+                sprintf(policy_str, "ROUNDROBIN");
+                break;
+            default:
+                sprintf(policy_str, "???");
+        }
+    }
+    else
+        sprintf( policy_str, "∅" );
+
+    char *out_suffix = NULL;
+    double scaled_bytes_out = fmt_iec_size(context->bytes_out, &out_suffix);
+
+    char *in_suffix = NULL;
+    double scaled_bytes_in = fmt_iec_size(context->bytes_in, &in_suffix);
+
+    printf( "%08x |%10s |%10.2f %3s |%10.2f %3s |%10s | ",
+            address,
+            state_str,
+            scaled_bytes_in,
+            in_suffix,
+            scaled_bytes_out,
+            out_suffix,
+            policy_str);
+
+    if( forward != NULL && forward->edgeList != NULL ) {
+        printf( "FORWARD: %p\n", forward );
+        edge_t *iter = forward->edgeList;
+        while ( iter != NULL) {
+            printf("%p, ", iter );
+            iter = iter->next;
+        }
+    }
+    else
+        printf( "∅" );
+
+    printf( "\n" );
 }
 
 void emitStatistics( FILE * stream ) {
     fprintf( stream, "UID      | State     | In            | Out           | Policy    | Links\n" );
 
-    pthread_mutex_lock( &table_address_mutex );
-    address_trie_walk( table_address, &renderAddressesToFILE, stream );
-    printf( "Trie Dump\n" );
-    address_trie_dump( table_address, 0 );
-    pthread_mutex_unlock( &table_address_mutex );
+    node_table_walk( printDetails );
 
     fprintf( stream, "\n" );
 }
 
-client_context_t * findByAddress( gnw_address_t address ) {
-    pthread_mutex_lock(&table_address_mutex);
-    client_context_t * context = (client_context_t *)address_trie_find( table_address, address, 0 );
-    pthread_mutex_unlock(&table_address_mutex);
-
-    return context;
-}
-
-void context_cleanup( client_context_t * context ) {
+void context_cleanup( context_t * context ) {
     context->state = GNW_STATE_CLOSE;
     close( context->socket_fd );
     ringbuffer_destroy( context->rx_buffer );
@@ -207,21 +272,12 @@ void context_cleanup( client_context_t * context ) {
     // Become zombie, in case cleanup fails
     context->state = GNW_STATE_ZOMBIE;
 
-    pthread_mutex_lock( &table_address_mutex );
-    address_trie_remove( table_address, context->address, 0 );
-    pthread_mutex_unlock( &table_address_mutex );
-
     free( context );
 }
 
 void * clientProcess( void * _context ) {
-    client_context_t * context = (client_context_t *)_context;
+    context_t * context = (context_t *)_context;
     context->state = GNW_STATE_OPEN;
-
-    unsigned char clientAddress[20] = { 0 };
-    gnw_format_address( clientAddress, context->address );
-
-    printf( "%s\tState: OPEN\n", clientAddress );
 
     // Fire up our ring buffer
     context->rx_buffer = ringbuffer_init( config.network_mtu * 100 ); // 20 packets of MTU-size
@@ -249,7 +305,7 @@ void * clientProcess( void * _context ) {
 
         // Wait error, drop back to callee
         if( rv == -1 ) {
-            fprintf( stderr, "IO Error, dropping client %s.\n", clientAddress );
+            log_error( "IO Error, dropping client.\n" );
             context_cleanup( context );
             return NULL;
         }
@@ -258,7 +314,7 @@ void * clientProcess( void * _context ) {
         if( rv == 0 ) {
             if( context->state == GNW_STATE_OPEN ) {
                 if (logout_timeout-- < 0) {
-                    fprintf( stdout, "Client %s timed out, dropping them.\n", clientAddress );
+                    log_warn( "Client timed out, dropping them.\n" );
                     context_cleanup( context );
                     return NULL;
                 }
@@ -277,14 +333,14 @@ void * clientProcess( void * _context ) {
         }
 
         if( bytes == -1 ) {
-            fprintf( stderr, "%s\tClient connection looks dropped\n", clientAddress );
+            log_warn( "Client connection looks dropped\n" );
             continue;
         }
 
         // Attempt (or re-attempt) to push to the ring, backing off as required.
         read_back_off = false;
         if( ringbuffer_write( context->rx_buffer, latchBuffer, bytes ) != bytes ) {
-            fprintf(stderr, "Buffer overflow! Read backoff enabled, trying to drain the buffer...\n" );
+            log_warn( "Buffer overflow! Read backoff enabled, trying to drain the buffer...\n" );
             read_back_off = true;
         }
         else
@@ -299,18 +355,38 @@ void * clientProcess( void * _context ) {
             unsigned char * packet_payload = (unsigned char *)( iBuffer + sizeof(gnw_header_t) );
 
             switch( packet_header->type ) {
-                case GNW_DATA:
+                case GNW_DATA: {
+                    // Check out any edges for this source...
+                    forward_t *forward = forward_table_find(packet_header->source);
 
                     // Fast exit, if there are no links associated with this node
-                    if( context->links == NULL )
+                    if (forward == NULL || forward->edgeList == NULL)
                         break;
 
-                    switch( context->link_policy ) {
+                    switch (forward->forward_policy) {
                         case GNW_POLICY_BROADCAST: {
-                            sink_t *iter = context->links;
+                            pthread_mutex_lock(&forward->listLock);
+                            edge_t *iter = forward->edgeList;
                             while (iter != NULL) {
-                                client_context_t *remote = iter->target_context;
-                                gnw_emitDataPacket(remote->socket_fd, context->address, packet_payload,
+                                context_t *remote = iter->context;
+                                if (remote == NULL) {
+                                    remote = node_table_find(iter->target);
+                                    iter->context = remote;
+                                    log_info(
+                                            "Populated [%08x]'s context reference, subsequent lookups will be faster :)",
+                                            iter->target);
+                                }
+
+                                if (remote == NULL) {
+                                    log_write(SEVERE,
+                                              "Somehow, target [%08x] managed to get into [%08x]'s forward list! Something is very wrong!",
+                                              iter->target, packet_header->source);
+                                    log_write(SEVERE, "Giving up on this broadcast, to save the rest of the graph!");
+                                    pthread_mutex_unlock(&forward->listLock);
+                                    break;
+                                }
+
+                                gnw_emitDataPacket(remote->socket_fd, packet_header->source, packet_payload,
                                                    packet_header->length);
                                 context->bytes_out += packet_header->length;
                                 context->packets_out++;
@@ -319,21 +395,32 @@ void * clientProcess( void * _context ) {
 
                                 iter = iter->next;
                             }
+                            pthread_mutex_unlock(&forward->listLock);
                             break;
                         }
 
                         case GNW_POLICY_ANYCAST: {
-                            client_context_t * remote = context->links->target_context;
-                            sink_t * iter = context->links;
-                            for( int probability = 2; iter != NULL; probability++ ) {
-                                if( rand() % probability == 0 )
-                                    remote = iter->target_context;
+                            pthread_mutex_lock(&forward->listLock);
+
+                            edge_t *target = forward->edgeList;
+                            edge_t *iter = forward->edgeList;
+                            for (int probability = 2; iter != NULL; probability++) {
+                                if (rand() % probability == 0)
+                                    target = iter;
                                 iter = iter->next;
                             }
 
+                            context_t *remote = target->context;
+                            if (remote == NULL) {
+                                remote = node_table_find(iter->target);
+                                iter->context = remote;
+                                log_info("Populated [%08x]'s context reference, subsequent lookups will be faster :)",
+                                         iter->target);
+                            }
+
                             // Guard against
-                            if( remote != NULL ) {
-                                gnw_emitDataPacket(remote->socket_fd, context->address, packet_payload,
+                            if (remote != NULL) {
+                                gnw_emitDataPacket(remote->socket_fd, packet_header->source, packet_payload,
                                                    packet_header->length);
                                 context->bytes_out += packet_header->length;
                                 context->packets_out++;
@@ -341,116 +428,127 @@ void * clientProcess( void * _context ) {
                                 remote->packets_in++;
                             }
 
+                            pthread_mutex_unlock(&forward->listLock);
                             break;
                         }
 
                         case GNW_POLICY_ROUNDROBIN:
-                            if( context->roundrobin_iter == NULL )
-                                context->roundrobin_iter = context->links;
+                            pthread_mutex_lock(&forward->listLock);
+                            if (forward->round_robin_ref == NULL)
+                                forward->round_robin_ref = forward->edgeList;
 
-                            // Just bail if we don't have anything to work with
-                            if( context->roundrobin_iter == NULL )
+                            // Just bail if we don't have anything to work with, just in case!
+                            if (forward->round_robin_ref == NULL) {
+                                pthread_mutex_unlock(&forward->listLock);
                                 break;
+                            }
 
-                            client_context_t * remote = context->roundrobin_iter->target_context;
+                            // Find the context for this address, by lookup or by fast reference
+                            context_t *remote = forward->round_robin_ref->context;
+                            if (remote == NULL) {
+                                remote = node_table_find(forward->round_robin_ref->target);
+                                forward->round_robin_ref->context = remote;
+                                log_info("Populated [%08x]'s context reference, subsequent lookups will be faster :)",
+                                         forward->round_robin_ref->target);
+                            }
 
-                            gnw_emitDataPacket(remote->socket_fd, context->address, packet_payload, packet_header->length);
+                            gnw_emitDataPacket(remote->socket_fd, packet_header->source, packet_payload,
+                                               packet_header->length);
                             context->bytes_out += packet_header->length;
                             context->packets_out++;
                             remote->bytes_in += packet_header->length;
                             remote->packets_in++;
 
-                            context->roundrobin_iter = context->roundrobin_iter->next;
-
+                            forward->round_robin_ref = forward->round_robin_ref->next;
+                            pthread_mutex_unlock(&forward->listLock);
                             break;
                     }
 
                     break;
+                }
 
                 case GNW_COMMAND:
                     if( packet_header->length < 1 ) {
-                        fprintf( stderr, "%s\tClient sent a command with no operator, skipping.\n", clientAddress );
+                        log_warn( "Client sent a command with no operator, skipping." );
                         break;
                     }
 
                     // Select based on the first byte -> The operator
                     switch( *packet_payload ) {
                         case GNW_CMD_NEW_ADDRESS:
-                            fprintf( stdout, "%s\tAddress request.\n", clientAddress );
+                            log_info( "New address request" );
+
+                            gnw_address_t fresh_address = genNextValidAddress();
 
                             if( packet_header->length != 1 ) {
                                 gnw_address_t * reqAddress = (gnw_address_t *)(packet_payload+1);
                                 gnw_address_t nodeMask = (~(unsigned)0) ^ (unsigned)0xFF;
 
                                 if( (*reqAddress & nodeMask) == *reqAddress ) {
-                                    fprintf(stdout, "%s\tNode requested a specific address (%08x), checking availability\n", clientAddress, *reqAddress);
+                                    log_info( "Context requested a specific address [%08x], checking for availability\n", *reqAddress );
 
-                                    pthread_mutex_lock(&table_address_mutex);
-                                    void *testContext = address_trie_find(table_address, *reqAddress, 0);
-                                    if (testContext == NULL) {
-                                        fprintf(stdout, "%s\tAddress is available! Claiming!\n", clientAddress);
-                                        address_trie_remove(table_address, context->address, 0);   // Remove the old address
-                                        context->address = *reqAddress;                            // Update the internal values
-                                        gnw_format_address(clientAddress, context->address);
-                                        address_trie_put(table_address, context, context->address, 0); // Push the new structure
-                                    } else {
-                                        fprintf(stdout, "%s\tAddress is in use - refusing the claim.\n", clientAddress);
+                                    if( node_table_find( *reqAddress ) != NULL ) {
+                                        log_warn( "Address already in use, refusing the claim on [%08x]", *reqAddress );
                                     }
-                                    pthread_mutex_unlock(&table_address_mutex);
+                                    else
+                                        fresh_address = *reqAddress;
                                 }
                                 else {
-                                    fprintf( stdout, "%s\tBad request address - node addresses cannot be non-zero in the last octet!\n", clientAddress );
+                                    log_warn( "Bad request address - node addresses cannot be non-zero in the last octet! Using generated address instead." );
                                 }
                             }
+
+                            // Actually become a node at this point - up to now, this could have just been a context_t reference to a thread...
+                            node_table_add( fresh_address, context );
+
                             unsigned char * replyBuffer = malloc( sizeof(gnw_address_t) + 1 );
                             *replyBuffer = GNW_CMD_NEW_ADDRESS;
                             gnw_address_t * payload = (gnw_address_t *)(replyBuffer + 1);
-                            *payload = context->address;
+                            *payload = fresh_address;
                             gnw_emitCommandPacket( context->socket_fd, GNW_COMMAND | GNW_REPLY, replyBuffer, sizeof(gnw_address_t)+1 );
-
                             free( replyBuffer );
 
                             // Going live (run state)
-                            context->state = GNW_STATE_RUN;
-                            fprintf( stdout, "%s\tClient going to RUN state, will not time out.\n", clientAddress );
-                            tick_rate = 10000; // Now tick at 10 second intervals, just so we don't spin unnecessarily
+                            if( context->state == GNW_STATE_OPEN ) {
+                                context->state = GNW_STATE_RUN;
+                                log_info( "Client going to RUN state, will not time out." );
+                                tick_rate = 10000; // Now tick at 10 second intervals, just so we don't spin unnecessarily
+                            }
                             break;
 
                         case GNW_CMD_STATUS:
-                            fprintf( stdout, "%s\tStatus request.\n", clientAddress );
+                            log_info( "Status request.\n" );
 
                             emitStatistics( stdout );
 
                             break;
 
                         case GNW_CMD_POLICY: {
-                            fprintf(stdout, "%s\tNode policy change.\n", clientAddress);
+                            log_info( "Node policy change." );
 
                             unsigned char newPolicy = *(packet_payload + 1);
                             gnw_address_t target = *(gnw_address_t *) (packet_payload + 2);
 
                             if( target < 1 ) {
-                                fprintf( stderr, "No endpoint can ever be address zero!\n" );
+                                log_warn( "No endpoint can ever be address zero!" );
                                 break;
                             }
 
-                            fprintf( stdout, "%s\tTarget: %08x\n", clientAddress, target );
-
-                            client_context_t * node = findByAddress( target );
-                            if( node == NULL ) {
-                                fprintf( stderr, "No such valid address -> %lx\n", target );
+                            forward_t * forward = forward_table_find( target );
+                            if( forward == NULL ) {
+                                log_error( "No such valid address [%08x], ignored request", target );
                                 break;
                             }
-                            fprintf(stdout, "%lx policy changed from %d to %d\n", target, node->link_policy,
-                                    newPolicy);
-                            node->link_policy = newPolicy;
+
+                            log_info( "[%08x] policy changed from %d to %d", target, forward->forward_policy, newPolicy );
+                            forward->forward_policy = newPolicy;
 
                             break;
                         }
 
 
                         case GNW_CMD_CONNECT:
-                            fprintf( stdout, "%s\tNode connect request.\n", clientAddress );
+                            log_info( "Node connect request." );
 
                             gnw_address_t source_address = *(gnw_address_t *)(packet_payload+1);
                             gnw_address_t target_address = *(gnw_address_t *)(packet_payload+1+sizeof(gnw_address_t));
@@ -458,35 +556,24 @@ void * clientProcess( void * _context ) {
                             fprintf( stdout, "%x -> %x\n", source_address, target_address );
 
                             // Try to grab the source context, if any
-                            client_context_t * source = findByAddress( source_address );
+                            context_t * source = node_table_find( source_address );
                             if( source == NULL ) {
                                 fprintf( stderr, "No such valid source address -> %lx\n", source_address );
                                 break;
                             }
 
                             // Try to grab the target context, if any
-                            client_context_t * target = findByAddress( target_address );
+                            context_t * target = node_table_find( target_address );
                             if( target == NULL ) {
                                 fprintf( stderr, "No such valid target address -> %lx\n", target_address );
                                 break;
                             }
 
-                            sink_t * newSink = malloc( sizeof(sink_t) );
-                            newSink->target_context = target;
-                            newSink->next = NULL;
-
-                            // Prepend to the sink list
-                            if( source->links == NULL ) {
-                                source->links = newSink;
-                            } else {
-                                newSink->next = source->links;
-                                source->links = newSink;
-                            }
-
+                            forward_table_add_edge( source_address, target_address );
                             break;
 
                         default:
-                            fprintf( stderr, "%s\tUnknown command, skipped.\n", clientAddress );
+                            log_warn( "Unknown command, skipped" );
                             gnw_dumpPacket( stdout, iBuffer, -1 );
                             break;
                     }
@@ -503,7 +590,7 @@ void * clientProcess( void * _context ) {
 
     }
 
-    printf( "%s\nState: CLOSE.\n", clientAddress );
+    log_info( "State: CLOSE" );
     context_cleanup( context );
     return NULL;
 }
@@ -536,8 +623,10 @@ int router_process() {
     }
 
     // Set up the address and forward tables
-    table_address = address_trie_init();
-    pthread_mutex_init( &table_address_mutex, NULL );
+    node_table_init();
+    forward_table_init();
+
+    context_list  = ll_create();
 
     // Begin running the status process (maybe this should become a watchdog in the future?)
     printf( "STATUS CREATE\n" );
@@ -556,22 +645,12 @@ int router_process() {
 
         printf( "SOCK: %d\n", remote_fd );
 
-        client_context_t *new_context = malloc(sizeof(client_context_t));
-        memset(new_context, 0, sizeof(client_context_t));
+        context_t *new_context = malloc(sizeof(context_t));
+        memset(new_context, 0, sizeof(context_t));
         new_context->thread_state = malloc(sizeof(pthread_t));
         new_context->socket_fd = remote_fd;
 
-        // Lock & Load the new context
-        pthread_mutex_lock(&table_address_mutex);
-
-        // Find a spare address slot
-        do {
-            new_context->address = (++nextNodeAddress) << 8;
-            fprintf( stdout, "Trying address %08x...\n", new_context->address );
-        } while( address_trie_find( table_address, new_context->address, 0 ) != NULL );
-
-        address_trie_put( table_address, new_context, new_context->address, 0 );
-        pthread_mutex_unlock(&table_address_mutex);
+        ll_append( context_list, new_context );
 
         int result = pthread_create( new_context->thread_state, NULL, clientProcess, new_context );
         assert( !result, "Could not create a new child process!" );
@@ -594,6 +673,8 @@ int router_process() {
 int main(int argc, char ** argv ) {
 
     setExitOnAssert( true ); // Crash out on assertion failures!
+
+    log_setLevel( DEBUG );
 
     config.network_mtu = getIFaceMTU( "lo" );
     config.system_state = SYSTEM_ACTIVE;

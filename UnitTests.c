@@ -24,9 +24,9 @@
 #include "lib/RingBuffer.h"
 #include "lib/GraphNetwork.h"
 #include "lib/utility.h"
-#include "lib/AddressTrie.h"
 #include "lib/BTree.h"
 #include "lib/avl.h"
+#include "Log.h"
 #include <arpa/inet.h>
 
 void test_ring_buffer() {
@@ -140,25 +140,6 @@ void printBits(size_t const size, void const * const ptr)
     puts("");
 }
 
-void test_byteTrie() {
-    address_trie_t ** table = address_trie_init();
-
-    printf( "Generating fake table...\n" );
-    for( int i=0; i<0x1000; i++ )
-        address_trie_put(table, 1, i, 0);
-
-    printf( "Removing table entries...\n" );
-    for( int i=0; i<0x1000; i++ )
-        address_trie_remove(table, i, 0);
-
-    printf( "Final\n" );
-    address_trie_dump( table, 0 );
-
-    // Kill the outer table. Kinda has to be manual for now
-    free( table );
-}
-
-
 void printIndent( unsigned int depth, const char * indent ) {
     while( depth-- > 0 )
         printf( "%s", indent );
@@ -181,43 +162,17 @@ typedef struct dummy {
     uint32_t address;
 } dummy_t;
 
-void avl_to_dot( FILE * stream, struct avl_node * node ) {
-    fprintf( stream, "node_%u [label=\"%d\"];\n", ((dummy_t *)node->avl_data)->address, ((dummy_t *)node->avl_data)->address );
-    if( node->avl_link[0] != NULL ) {
-        fprintf( stream, "node_%u -> node_%u [label=\" lt\"];\n", ((dummy_t *)node->avl_data)->address, ((dummy_t *)node->avl_link[0]->avl_data)->address );
-        avl_to_dot( stream, node->avl_link[0] );
-    }
-    if( node->avl_link[1] != NULL ) {
-        fprintf( stream, "node_%u -> node_%u [label=\" gt\"];\n", ((dummy_t *)node->avl_data)->address, ((dummy_t *)node->avl_link[1]->avl_data)->address );
-        avl_to_dot( stream, node->avl_link[1] );
-    }
-}
-
 int avl_index_comparitor ( const void *avl_a, const void *avl_b, void *avl_param ) {
     dummy_t * a = (dummy_t *)avl_a;
     dummy_t * b = (dummy_t *)avl_b;
     return a->address - b->address;
 }
 
-void print_tree_structure (struct avl_node *node)
-{
-    if( node == NULL ) {
-        printf( "∅" );
-        return;
-    }
-
-    printf( "%u{", ((dummy_t *)node->avl_data)->address );
-    print_tree_structure( node->avl_link[0] );
-    printf( "," );
-    print_tree_structure( node->avl_link[1] );
-    printf( "}" );
-}
-
 void test_btree() {
     struct avl_table * table = avl_create( &avl_index_comparitor, NULL, &avl_allocator_default );
 
+    dummy_t *a = malloc(sizeof(dummy_t));
     for( int i=0; i<10; i++ ) {
-        dummy_t *a = malloc(sizeof(dummy_t));
         a->address = (uint32_t) i;
         avl_insert(table, a);
     }
@@ -225,11 +180,7 @@ void test_btree() {
     dummy_t query = { .address = 5 };
     dummy_t * result = avl_find( table, &query );
 
-    printf( "Found: %u\n", result->address );
-
-    //print_tree_structure( table->avl_root );
-
-    avl_to_dot( stdout, table->avl_root );
+    assert( result == a, "Return data mismatch" );
 
 }
 
@@ -238,8 +189,15 @@ int main(int argc, char * argv ) {
     setReportAssert( false );
     setExitOnAssert( true );
 
+    log_setLevel( WARNING );
+    log_info( "Just testing the log output - INFO" );
+    log_warn( "Just testing the log output - WARNING" );
+    log_error( "Just testing the log output - ERROR" );
+    log_write( 2, "Log level 2" );
+    log_write( 3, "Log level 3" );
+    log_write( 4, "Log level 4" );
+
     //test_ring_buffer();
-    //test_byteTrie();
     test_btree();
 
     //test_network_sync();

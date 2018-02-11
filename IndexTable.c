@@ -15,12 +15,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-#include "AddressTable.h"
-#include "lib/avl.h"
-#include <stdint.h>
-#include <stdlib.h>
-#include <unitypes.h>
-#include "lib/LinkedList.h"
+#include <malloc.h>
+#include "IndexTable.h"
 
 int compareAddress32( const void * a, const void * b, void * param ) {
     if( a == NULL || b == NULL )
@@ -37,18 +33,46 @@ void * table_put(struct avl_table *table, uint32_t address, void * data) {
     entry_t * newEntry = malloc( sizeof(entry_t) );
     newEntry->address = address;
     newEntry->data = data;
-
     avl_insert( table, newEntry );
-
     return newEntry->data;
 }
 
 void * table_find(struct avl_table *table, uint32_t address) {
     entry_t query = { .address=address };
-    return &((entry_t * )avl_find( table, &query ))->links;
+    entry_t * entry = avl_find( table, &query );
+
+    printf( "QUERY: %p -> %p\n", &query, entry );
+
+    if( entry != NULL )
+        return entry->data;
+    return NULL;
 }
 
 void * table_remove( struct avl_table *table, uint32_t address) {
     entry_t query = { .address=address };
-    return avl_delete( table, &query );
+    entry_t * entry = avl_delete( table, &query );
+    if( entry != NULL ) {
+        void *data = entry->data;
+        free(entry);
+        return data;
+    }
+    free( entry );
+    return NULL;
+}
+
+void table_walk_r( struct avl_node * node, void (*handler)(uint32_t, void *) ) {
+    if( node == NULL )
+        return;
+
+    entry_t * entry = node->avl_data;
+
+    printf( "%x -> %p\n", entry->address, entry->data );
+    handler( entry->address, entry->data );
+
+    table_walk_r( node->avl_link[0], handler );
+    table_walk_r( node->avl_link[1], handler );
+}
+
+void table_walk( struct avl_table *table, void (*handler)(uint32_t, void *) ) {
+    table_walk_r( table->avl_root, handler );
 }

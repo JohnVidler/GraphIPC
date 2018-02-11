@@ -20,7 +20,6 @@
 #include <stdint.h>
 #include <unitypes.h>
 #include "lib/avl.h"
-#include "lib/LinkedList.h"
 
 typedef struct entry {
     uint32_t address;
@@ -30,4 +29,5 @@ typedef struct entry {
 void * table_create();
 void * table_put(struct avl_table *table, uint32_t address, void * data);
 void * table_find(struct avl_table *table, uint32_t address);
-void * table_remove(uint32_t address);
+void * table_remove( struct avl_table *table, uint32_t address);
+void table_walk( struct avl_table *table, void (*handler)(uint32_t, void *) );
