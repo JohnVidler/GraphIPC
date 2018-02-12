@@ -24,7 +24,6 @@
 #include "lib/RingBuffer.h"
 #include "lib/GraphNetwork.h"
 #include "lib/utility.h"
-#include "lib/BTree.h"
 #include "lib/avl.h"
 #include "Log.h"
 #include <arpa/inet.h>
@@ -143,19 +142,6 @@ void printBits(size_t const size, void const * const ptr)
 void printIndent( unsigned int depth, const char * indent ) {
     while( depth-- > 0 )
         printf( "%s", indent );
-}
-
-void btree_walk( btree_node_t * root, unsigned int depth ) {
-    if( root == NULL ) {
-        printf( "∅" );
-        return;
-    }
-
-    printf( "%u{", root->key );
-    btree_walk( root->lt, depth+1 );
-    printf( ", " );
-    btree_walk( root->gt, depth+1 );
-    printf( "}" );
 }
 
 typedef struct dummy {

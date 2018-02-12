@@ -149,11 +149,15 @@ bool gnw_nextPacket( RingBuffer_t * buffer, gnw_state_t * context, void * packet
     switch( context->state ) {
         case GNW_PARSE_SYNC:
             while( ringbuffer_length(buffer) > 0 && ringbuffer_peek( buffer, 0 ) != GNW_MAGIC )
-                ringbuffer_read( buffer, &discard, 1 );
+                ringbuffer_read(buffer, &discard, 1);
 
-            if( ringbuffer_peek(buffer, 0) == GNW_MAGIC )
-                context->state = GNW_PARSE_BUFFER;
-            break;
+            if( ringbuffer_peek(buffer, 0) != GNW_MAGIC )
+                break;
+
+            // Fall through if we already have a syncronised packet frame, otherwise we end up 1-frame behind the stream!
+            // This is mostly to prevent poll() from blocking if/when we return and the buffer is sync'd but hasn't
+            // actually read the packet yet, this way, it can do both at once!
+            context->state = GNW_PARSE_BUFFER;
 
         case GNW_PARSE_BUFFER:
             // Can we grab a whole header?

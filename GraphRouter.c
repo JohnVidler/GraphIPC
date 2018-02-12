@@ -42,6 +42,9 @@
 struct _configuration {
     int network_mtu;
     int system_state;
+    int verbosity;
+
+    bool arg_dot;
 };
 
 volatile struct _configuration config;
@@ -119,72 +122,6 @@ int getListenSocket( struct addrinfo * hints ) {
     return sockfd;
 }
 
-/*void renderAddressesToFILE( void * inContext, void * inFile ) {
-    context_t * context = (context_t *)inContext;
-    FILE * stream = (FILE *)inFile;
-
-    //if( context->state != GNW_STATE_ZOMBIE ) {
-    char state_str[32] = {0};
-    switch (context->state) {
-        case GNW_STATE_OPEN:
-            sprintf(state_str, "OPEN");
-            break;
-        case GNW_STATE_RUN:
-            sprintf(state_str, "RUN");
-            break;
-        case GNW_STATE_CLOSE:
-            sprintf(state_str, "CLOSE");
-            break;
-        case GNW_STATE_ZOMBIE:
-            sprintf(state_str, "ZOMBIE");
-            break;
-        default:
-            sprintf(state_str, "???");
-    }
-
-    char policy_str[32] = {0};
-    switch (context->link_policy) {
-        case GNW_POLICY_BROADCAST:
-            sprintf(policy_str, "BROADCAST");
-            break;
-        case GNW_POLICY_ANYCAST:
-            sprintf(policy_str, "ANYCAST");
-            break;
-        case GNW_POLICY_ROUNDROBIN:
-            sprintf(policy_str, "ROUNDROBIN");
-            break;
-        default:
-            sprintf(policy_str, "???");
-    }
-
-    char *out_suffix = NULL;
-    double scaled_bytes_out = fmt_iec_size(context->bytes_out, &out_suffix);
-
-    char *in_suffix = NULL;
-    double scaled_bytes_in = fmt_iec_size(context->bytes_in, &in_suffix);
-
-    fprintf(stream, "%08lx |%10s |%10.2f %3s |%10.2f %3s |%10s | ",
-            context->address,
-            state_str,
-            scaled_bytes_in,
-            in_suffix,
-            scaled_bytes_out,
-            out_suffix,
-            policy_str);
-
-    sink_t * iter = context->links;
-    while( iter != NULL ) {
-        context_t * remote = iter->target_context;
-        if( remote != NULL )
-            fprintf( stream, "%08x, ", remote->address );
-        else
-            fprintf( stream, "NULL, " );
-        iter = iter->next;
-    }
-
-    fprintf(stream, "\n");
-}*/
-
 void printDetails( gnw_address_t address, void * data ) {
     context_t * context = (context_t *)data;
 
@@ -225,7 +162,7 @@ void printDetails( gnw_address_t address, void * data ) {
         }
     }
     else
-        sprintf( policy_str, "∅" );
+        sprintf( policy_str, "None  " );
 
     char *out_suffix = NULL;
     double scaled_bytes_out = fmt_iec_size(context->bytes_out, &out_suffix);
@@ -243,10 +180,11 @@ void printDetails( gnw_address_t address, void * data ) {
             policy_str);
 
     if( forward != NULL && forward->edgeList != NULL ) {
-        printf( "FORWARD: %p\n", forward );
         edge_t *iter = forward->edgeList;
         while ( iter != NULL) {
-            printf("%p, ", iter );
+            printf("[%08x]", iter->target );
+            if( iter->next != NULL )
+                printf( ", " );
             iter = iter->next;
         }
     }
@@ -256,10 +194,29 @@ void printDetails( gnw_address_t address, void * data ) {
     printf( "\n" );
 }
 
+void printAsDOT( gnw_address_t address, void * data ) {
+    printf( "\tnode_%08x [label=\"0x%08x\"]\n", address, address );
+
+    forward_t * forward = forward_table_find( address );
+    if( forward != NULL ) {
+        edge_t *iter = forward->edgeList;
+        while ( iter != NULL) {
+            printf("\tnode_%08x -> node_%08x\n", address, iter->target );
+            iter = iter->next;
+        }
+    }
+}
+
 void emitStatistics( FILE * stream ) {
     fprintf( stream, "UID      | State     | In            | Out           | Policy    | Links\n" );
 
     node_table_walk( printDetails );
+
+    if( config.arg_dot ) {
+        printf("\ndigraph g {\n");
+        node_table_walk(printAsDOT);
+        printf("}\n\n");
+    }
 
     fprintf( stream, "\n" );
 }
@@ -285,7 +242,7 @@ void * clientProcess( void * _context ) {
     // Probably should be part of the thread context structure, but here for now...
     gnw_state_t parser_context = { .state = 0 };
 
-    printf( "Client poll loop running...\n" );
+    log_info( "Client poll loop running..." );
 
     struct pollfd watch_fd[1];
     memset( watch_fd, 0, sizeof( struct pollfd ) * 1 );
@@ -330,6 +287,13 @@ void * clientProcess( void * _context ) {
         if( read_back_off == false ) {
             memset( latchBuffer, 0, config.network_mtu ); // Here purely for sanity, remove for speeeeeed
             bytes = read(context->socket_fd, latchBuffer, config.network_mtu);
+
+            if( config.verbosity > 3 ) {
+                printf("[ ");
+                for (int i = 0; i < bytes; i++)
+                    printf("%02x ", latchBuffer[i]);
+                printf("]");
+            }
         }
 
         if( bytes == -1 ) {
@@ -547,30 +511,29 @@ void * clientProcess( void * _context ) {
                         }
 
 
-                        case GNW_CMD_CONNECT:
-                            log_info( "Node connect request." );
+                        case GNW_CMD_CONNECT: {
+                            gnw_address_t source_address = *(gnw_address_t *) (packet_payload + 1);
+                            gnw_address_t target_address = *(gnw_address_t *) (packet_payload + 1 + sizeof(gnw_address_t));
 
-                            gnw_address_t source_address = *(gnw_address_t *)(packet_payload+1);
-                            gnw_address_t target_address = *(gnw_address_t *)(packet_payload+1+sizeof(gnw_address_t));
-
-                            fprintf( stdout, "%x -> %x\n", source_address, target_address );
+                            log_info( "Node connect request [%08x] -> [%08x]", source_address, target_address );
 
                             // Try to grab the source context, if any
-                            context_t * source = node_table_find( source_address );
-                            if( source == NULL ) {
-                                fprintf( stderr, "No such valid source address -> %lx\n", source_address );
+                            context_t *source = node_table_find(source_address);
+                            if (source == NULL) {
+                                fprintf(stderr, "No such valid source address -> %lx\n", source_address);
                                 break;
                             }
 
                             // Try to grab the target context, if any
-                            context_t * target = node_table_find( target_address );
-                            if( target == NULL ) {
-                                fprintf( stderr, "No such valid target address -> %lx\n", target_address );
+                            context_t *target = node_table_find(target_address);
+                            if (target == NULL) {
+                                fprintf(stderr, "No such valid target address -> %lx\n", target_address);
                                 break;
                             }
 
-                            forward_table_add_edge( source_address, target_address );
+                            forward_table_add_edge(source_address, target_address);
                             break;
+                        }
 
                         default:
                             log_warn( "Unknown command, skipped" );
@@ -600,7 +563,7 @@ void * status_process( void * notused ) {
     while( config.system_state ) {
         emitStatistics( stdout );
 
-        sleep( 1 );
+        sleep( 10 );
     }
 }
 
@@ -623,7 +586,10 @@ int router_process() {
     }
 
     // Set up the address and forward tables
+    printf( "Node Table: " );
     node_table_init();
+
+    printf( "Forward Table: " );
     forward_table_init();
 
     context_list  = ll_create();
@@ -678,6 +644,7 @@ int main(int argc, char ** argv ) {
 
     config.network_mtu = getIFaceMTU( "lo" );
     config.system_state = SYSTEM_ACTIVE;
+    config.verbosity = 0;
 
     if( config.network_mtu == -1 ) {
         fprintf( stderr, "Unable to query the local interface MTU, defaulting to 1500\n" );
@@ -706,7 +673,13 @@ int main(int argc, char ** argv ) {
         // Argument Parsing //
         int arg;
         int indexPtr = 0;
-        while ((arg = getopt_long(argc, argv, "", longOptions, &indexPtr)) != -1) {
+        while ((arg = getopt_long(argc, argv, "d", longOptions, &indexPtr)) != -1) {
+
+            // If we have a short arg, pass it over to the long arg index.
+            // Note: This will work assuming we have less than 65(?) long arguments... I think -John.
+            if( arg > 0 )
+                indexPtr = arg;
+
             switch (indexPtr) {
                 case ARG_STATUS: {
                     unsigned char buffer[1] = { GNW_CMD_STATUS };
@@ -761,8 +734,10 @@ int main(int argc, char ** argv ) {
                     return EXIT_SUCCESS;
                 }
 
-                case ARG_SOURCE: arg_source_address = strtoul( optarg, NULL, 10 ); break;
-                case ARG_TARGET: arg_target_address = strtoul( optarg, NULL, 10 ); break;
+                case ARG_SOURCE: arg_source_address = strtoul( optarg, NULL, 16 ); break;
+                case ARG_TARGET: arg_target_address = strtoul( optarg, NULL, 16 ); break;
+
+                case 'd': config.arg_dot = true; break;
 
                 default:
                     fprintf(stderr, "Bad command combination. STOP.");
@@ -770,10 +745,6 @@ int main(int argc, char ** argv ) {
                     return EXIT_SUCCESS;
             }
         }
-
-        fprintf( stderr, "Unrecognised argument combination...?\n" );
-        close( rfd );
-        return EXIT_SUCCESS;
     }
 
     return router_process();

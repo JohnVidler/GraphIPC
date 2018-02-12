@@ -40,9 +40,6 @@ void * table_put(struct avl_table *table, uint32_t address, void * data) {
 void * table_find(struct avl_table *table, uint32_t address) {
     entry_t query = { .address=address };
     entry_t * entry = avl_find( table, &query );
-
-    printf( "QUERY: %p -> %p\n", &query, entry );
-
     if( entry != NULL )
         return entry->data;
     return NULL;
@@ -66,7 +63,6 @@ void table_walk_r( struct avl_node * node, void (*handler)(uint32_t, void *) ) {
 
     entry_t * entry = node->avl_data;
 
-    printf( "%x -> %p\n", entry->address, entry->data );
     handler( entry->address, entry->data );
 
     table_walk_r( node->avl_link[0], handler );

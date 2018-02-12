@@ -44,15 +44,16 @@ extern char **environ;
 struct _configuration {
     int            network_mtu;     // default = 1500
     unsigned int   read_timeout;    // default = 5
-    gnw_address_t  graph_address;   // default = 0
     RingBuffer_t * rx_buffer;
     gnw_state_t *  parser_context;
 
-    char *        arg_host;
-    char *        arg_port;
-    gnw_address_t arg_address;
-    bool          arg_immediate;
-    unsigned int  arg_verbosity;
+    unsigned int   arg_model;
+
+    char *         arg_host;
+    char *         arg_port;
+    gnw_address_t  arg_address;
+    bool           arg_immediate;
+    unsigned int   arg_verbosity;
 };
 struct _configuration config;
 
@@ -71,91 +72,97 @@ pthread_mutex_t sink_context_list_mutex;
 int router_fd = -1;
 int getRouterFD() {
     if( router_fd == -1 ) {
-        fprintf( stderr, "Connecting to router at %s:%s...\n", config.arg_host, config.arg_port );
+        log_info( "Connecting to router at %s:%s...", config.arg_host, config.arg_port );
         router_fd = socket_connect(config.arg_host, config.arg_port);
 
         // Build the other network-related structures
         config.parser_context = malloc( sizeof(gnw_state_t) );
         config.rx_buffer = ringbuffer_init( config.network_mtu * 20 ); // 20 packet(ish) buffer
-
-        // Get an address from the router, too
-        unsigned char iBuffer[config.network_mtu];
-        while( config.graph_address == 0 ) {
-            // Ask for an address
-            fprintf( stderr, "Requesting an address from the router...\n" );
-            if( config.arg_address == 0 ) {
-                gnw_sendCommand(router_fd, GNW_CMD_NEW_ADDRESS);
-            }
-            else {
-                // Bit of a hack - send the requested address with the new address request... Might just be ignored ar the router, though!
-                unsigned char reqBuffer[sizeof(gnw_address_t)+1] = { GNW_CMD_NEW_ADDRESS, 0 };
-                memcpy( reqBuffer+1, &config.arg_address, sizeof(gnw_address_t) );
-                gnw_emitCommandPacket( router_fd, GNW_COMMAND, reqBuffer, sizeof(gnw_address_t) + 1 );
-            }
-
-            ssize_t bytesRead = read( router_fd, iBuffer, config.network_mtu );
-            if( bytesRead <= 0 ) {
-                fprintf( stderr, "IO Error, halting! (1)\n" );
-                exit( EXIT_FAILURE ); // Hard exit here, as return fails to... well, fail. -John
-            }
-            if( ringbuffer_write( config.rx_buffer, iBuffer, bytesRead ) != bytesRead )
-                fprintf( stderr, "Buffer overflow! Data loss occurred!" );
-
-            while( gnw_nextPacket( config.rx_buffer, config.parser_context, iBuffer ) ) {
-                gnw_header_t * header = (gnw_header_t *)iBuffer;
-                unsigned char * payload = iBuffer + sizeof(gnw_header_t);
-
-                // Uncomment for debug output
-                //gnw_dumpPacket( stdout, iBuffer, -1 );
-
-                if( header->version != GNW_VERSION )
-                    fprintf( stderr, "Warning! Router/Client version mismatch!\n" );
-
-                switch( header->type ) {
-                    case GNW_COMMAND | GNW_REPLY: // Command response
-                        if( header->length < 1 ) {
-                            fprintf( stderr, "Router sent a command with no operator, no idea what to do! Trying to skip past it...\n" );
-                            break;
-                        }
-
-                        switch( *payload ) {
-                            case GNW_CMD_NEW_ADDRESS:
-                                if( config.graph_address == 0 ) {
-                                    config.graph_address = *(gnw_address_t *)(payload + 1);
-
-                                    if( config.graph_address != config.arg_address )
-                                        fprintf( stderr, "Router refused our address request, actually got %08x\n", config.graph_address );
-
-                                    //config.graph_address = 0xFFFFFFFF & config.graph_address;
-                                }
-                                break;
-
-                            default:
-                                fprintf( stderr, "Unknown command response?\n" );
-                                break;
-                        }
-
-                        break;
-
-                    case GNW_DATA:
-                        if( header->length == 0 )
-                            fprintf( stderr, "Router keepalive received (lossy connection?)\n" );
-                        break;
-
-                    default:
-                        fprintf( stderr, "Unknown response from router, skipping. (%x)\n", header->type );
-                }
-            }
-        }
-
-        fprintf( stderr, "Address is %x\n", config.graph_address );
     }
     return router_fd;
 }
 
+gnw_address_t getNodeAddress( gnw_address_t try_address ) {
+    int router = getRouterFD();
+
+    gnw_address_t new_address = 0;
+
+    // Ask for an address
+    if( try_address == 0 ) {
+        log_info( "Requesting an address from the router..." );
+        gnw_sendCommand(router, GNW_CMD_NEW_ADDRESS);
+    }
+    else {
+        // Bit of a hack - send the requested address with the new address request... Might just be ignored ar the router, though!
+        log_info( "Requesting address [%08x] from the router...", try_address );
+        unsigned char reqBuffer[sizeof(gnw_address_t)+1] = { GNW_CMD_NEW_ADDRESS, 0 };
+        memcpy( reqBuffer+1, &try_address, sizeof(gnw_address_t) );
+        gnw_emitCommandPacket( router, GNW_COMMAND, reqBuffer, sizeof(gnw_address_t) + 1 );
+    }
+
+    unsigned char iBuffer[config.network_mtu];
+    while( new_address == 0 ) {
+        ssize_t bytesRead = read( router, iBuffer, config.network_mtu );
+        if( bytesRead <= 0 ) {
+            log_error( "IO Error, halting! (1)" );
+            exit( EXIT_FAILURE ); // Hard exit here, as return fails to... well, fail. -John
+        }
+        if( ringbuffer_write( config.rx_buffer, iBuffer, bytesRead ) != bytesRead )
+            log_warn( "Buffer overflow! Data loss occurred!" );
+
+        while( gnw_nextPacket( config.rx_buffer, config.parser_context, iBuffer ) ) {
+            gnw_header_t * header = (gnw_header_t *)iBuffer;
+            unsigned char * payload = iBuffer + sizeof(gnw_header_t);
+
+            // Uncomment for debug output
+            //gnw_dumpPacket( stdout, iBuffer, -1 );
+
+            if( header->version != GNW_VERSION )
+                log_warn( "Warning! Router/Client version mismatch!" );
+
+            switch( header->type ) {
+                case GNW_COMMAND | GNW_REPLY: // Command response
+                    if( header->length < 1 ) {
+                        log_warn( "Router sent a command with no operator, no idea what to do! Trying to skip past it..." );
+                        break;
+                    }
+
+                    switch( *payload ) {
+                        case GNW_CMD_NEW_ADDRESS:
+                            if( new_address == 0 ) {
+                                new_address = *(gnw_address_t *)(payload + 1);
+
+                                if( new_address != try_address )
+                                    log_warn( "Router refused our address request, actually got %08x", new_address );
+                            }
+                            break;
+
+                        default:
+                            log_warn( "Unknown command response? (%u)", (unsigned char)(*payload) );
+                            break;
+                    }
+
+                    break;
+
+                case GNW_DATA:
+                    if( header->length == 0 )
+                        log_warn("Router keepalive received (lossy connection?)");
+                    break;
+
+                default:
+                    log_warn( "Unknown response from router, skipping. (%x)", header->type );
+            }
+        }
+    }
+
+    log_info( "Address is now [%08x]", new_address );
+
+    return new_address;
+}
+
 int dropRouterFD() {
     if( router_fd != -1 ) {
-        fprintf( stderr, "Disconnecting from router...\n" );
+        log_info( "Disconnecting from router..." );
         ringbuffer_destroy(config.rx_buffer);
         free(config.parser_context);
         close(router_fd);
@@ -164,6 +171,12 @@ int dropRouterFD() {
 
 int mode_input() {
     int data_fd = getRouterFD();
+
+    // Become a node (aka. get an address)
+    gnw_address_t node_address = getNodeAddress( config.arg_address );
+
+    // Reset the request for an address, irrespective if we got it or not, otherwise we'll keep asking for the same one
+    config.arg_address = 0;
 
     struct pollfd watch_fd[1];
     memset( watch_fd, 0, sizeof( struct pollfd ) );
@@ -182,11 +195,11 @@ int mode_input() {
             ssize_t readBytes = read( watch_fd[0].fd, buffer, config.network_mtu );
 
             if( readBytes == 0 ) {
-                fprintf( stderr, "Input shut down, stopping." );
+                log_error( "Input shut down, stopping." );
                 break;
             }
 
-            gnw_emitDataPacket( data_fd, config.graph_address, buffer, readBytes );
+            gnw_emitDataPacket( data_fd, node_address, buffer, readBytes );
         }
     }
 
@@ -197,6 +210,12 @@ int mode_input() {
 
 int mode_output() {
     int data_fd = getRouterFD();
+
+    // Become a node (aka. get an address)
+    gnw_address_t node_address = getNodeAddress( config.arg_address );
+
+    // Reset the request for an address, irrespective if we got it or not, otherwise we'll keep asking for the same one
+    config.arg_address = 0;
 
     struct pollfd watch_fd[1];
     memset( watch_fd, 0, sizeof( struct pollfd ) );
@@ -214,11 +233,11 @@ int mode_output() {
             ssize_t bytesRead = read( watch_fd[0].fd, buffer, config.network_mtu );
             if( bytesRead <= 0 ) {
                 perror( "read" );
-                fprintf( stderr, "IO Error, halting! (2)\n" );
+                log_error( "IO Error, halting! (2)" );
                 return EXIT_FAILURE;
             }
             if( ringbuffer_write( config.rx_buffer, buffer, bytesRead ) != bytesRead )
-                fprintf( stderr, "Buffer overflow! Data loss occurred!" );
+                log_error( "Buffer overflow! Data loss occurred!" );
 
             while( gnw_nextPacket( config.rx_buffer, config.parser_context, buffer ) ) {
                 gnw_header_t *header = (gnw_header_t *) buffer;
@@ -226,13 +245,13 @@ int mode_output() {
                 *(payload + header->length) = '\0'; // Kludge?
 
                 if (header->version != GNW_VERSION)
-                    fprintf(stderr, "Warning! Router/Client version mismatch!\n");
+                    log_warn( "Warning! Router/Client version mismatch!" );
 
                 if( header->type == GNW_DATA ) {
                     fprintf( stdout, "%s", payload );
                     fflush( stdout );
                 } else {
-                    fprintf(stderr, "Warning! Router is emitting non-data packets in data mode!\n");
+                    log_warn( "Warning! Router is emitting non-data packets in data mode!" );
                 }
             }
         }
@@ -261,12 +280,12 @@ int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** ar
     dup2( wrap_stdin,  STDIN_FILENO  );
     dup2( wrap_stdout, STDOUT_FILENO );
 
-    fprintf( stderr, "Process started\n" );
+    log_debug( "Process started" );
 
     int result = execve( cmd, argv, environ );
 
     if( result != 0 )
-        fprintf( stderr, "Process terminated with error: %s\n", strerror(errno) );
+        log_error( "Process terminated with error: %s", strerror(errno) );
 
     return -1;
 }
@@ -274,7 +293,7 @@ int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** ar
 void * sink_thread( void * _context ) {
     sink_context_t * context = (sink_context_t *)_context;
 
-    printf( "Sink started!\n" );
+    log_debug( "Sink started!" );
 
     // Become two actual processes, launch the child.
     pid_t childPID = fork();
@@ -283,7 +302,7 @@ void * sink_thread( void * _context ) {
         return NULL; // Should never happen...
     }
 
-    printf( "CHILD PID:\t%d\n", childPID );
+    log_debug( "CHILD PID:\t%d", childPID );
 
     struct pollfd watch_fd[1];
     memset( watch_fd, 0, sizeof( struct pollfd ) * 2 );
@@ -292,13 +311,14 @@ void * sink_thread( void * _context ) {
     watch_fd[0].events = POLLIN;
 
     int rfd = getRouterFD(); // Note: we don't need to close this, the host binary will do this for us!
+    context->stream_address = getNodeAddress( 0 );
 
     int status = 0;
     while( status == 0 ) {
         int rv = poll( watch_fd, 1, config.read_timeout * 1000 );
 
         if( rv == -1 ) {        // Error state while poll'ing
-            fprintf( stderr, "Error during poll cycle for input. Shutting down.\n" );
+            log_error( "Error during poll cycle for input. Shutting down." );
             break;
         } else if( rv == 0 ) {  // Timed out on poll wait
 
@@ -306,7 +326,7 @@ void * sink_thread( void * _context ) {
             int status = 0;
             int ret = waitpid( childPID, &status, WNOHANG );
             if( ret == -1 && WIFEXITED(status) ) {
-                fprintf(stderr, "Process terminated (exit code = %d)\n", WEXITSTATUS(status));
+                log_error( "Process terminated (exit code = %d)", WEXITSTATUS(status));
                 status = 1;
                 break;
             }
@@ -322,7 +342,7 @@ void * sink_thread( void * _context ) {
                     if( config.arg_verbosity > 0 )
                         fprintf( stderr, ">>>\t%s\n", buffer );
 
-                    gnw_emitDataPacket( rfd, config.graph_address, buffer, bytesRead ); // Always emit from the node source address, not the stream source address
+                    gnw_emitDataPacket( rfd, context->stream_address, buffer, bytesRead ); // Always emit from the node source address, not the stream source address
                 }
             }
 
@@ -330,7 +350,7 @@ void * sink_thread( void * _context ) {
         }
     }
 
-    fprintf( stderr, "WARNING: Sink died - no way to handle this right now!\n" );
+    log_warn( "Sink died - no way to handle this right now!" );
     pthread_exit(0); // Just stop
 }
 
@@ -380,19 +400,19 @@ sink_context_t * createNewSink( char * binary, char ** arguments, gnw_address_t 
 
     // Build a new set of redirected pipes
     if( pipe( sink_context->wrap_stdin ) == -1 ) {
-        fprintf(stderr, "Could not create wrapper for stdin\n");
+        log_error( "Could not create wrapper for stdin");
         exit( EXIT_FAILURE );
     }
 
     if( pipe( sink_context->wrap_stdout ) == -1 ) {
-        fprintf(stderr, "Could not create wrapper for stdout\n");
+        log_error( "Could not create wrapper for stdout");
         exit( EXIT_FAILURE );
     }
 
     // Spin up a new instance!
     int result = pthread_create( &(sink_context->thread_context), NULL, sink_thread, sink_context );
     if( result != 0 ) {
-        fprintf(stderr, "Could not start up a new sink thread. Cannot continue.\n");
+        log_error( "Could not start up a new sink thread. Cannot continue.");
         exit( EXIT_FAILURE );
     }
     pthread_detach( sink_context->thread_context );
@@ -421,7 +441,6 @@ int main(int argc, char ** argv ) {
     // Configuration defaults
     config.network_mtu     = 1500;
     config.read_timeout    = 5;
-    config.graph_address   = 0;
 
     config.arg_host = "127.0.0.1";
     config.arg_port = (char *) ROUTER_PORT;
@@ -464,7 +483,7 @@ int main(int argc, char ** argv ) {
 
         switch (indexPtr) {
             case ARG_HELP:
-            case ARG_USAGE:
+            case ARG_USAGE: // ToDo: Update the argument list with the new argument options
                 printf( "GraphWrap\n" );
                 printf( ANSI_COLOR_GREEN "\t\t\"Don't cross the streams\" --Egon Spengler.\n\n" ANSI_COLOR_RESET );
                 printf( "Wrap a normal Linux process stdin/stdout pipes with GraphIPC connections to a GraphRouter process\nAllows non-compliant programs to be used in a graph\n\n" );
@@ -499,38 +518,40 @@ int main(int argc, char ** argv ) {
 
             case 'u':
             case ARG_UPSTREAM: {
-                int rfd = getRouterFD();
+                /*int rfd = getRouterFD();
                 if (rfd == -1) {
-                    fprintf(stderr, "Could not connect to the router. STOP.\n");
+                    log_error( "Could not connect to the router. STOP.");
                     exit(EXIT_FAILURE);
                 }
                 gnw_address_t target = (gnw_address_t)strtoul( optarg, NULL, 16 );
 
-                fprintf( stderr, "Connecting %x -> %x\n", target, config.graph_address );
+                log_info( "Connecting %x -> %x", target, config.graph_address );
 
-                gnw_request_connect( rfd, target, config.graph_address );
+                gnw_request_connect( rfd, target, config.graph_address );*/
+                log_warn( "UNIMPLEMENTED: UPSTREAM" );
                 break;
             }
 
             case 'd':
             case ARG_DOWNSTREAM: {
-                int rfd = getRouterFD();
+                /*int rfd = getRouterFD();
                 if (rfd == -1) {
-                    fprintf(stderr, "Could not connect to the router. STOP.\n");
+                    log_error( "Could not connect to the router. STOP.");
                     exit(EXIT_FAILURE);
                 }
                 gnw_address_t target = (gnw_address_t)strtoul( optarg, NULL, 16 );
 
-                fprintf( stderr, "Connecting %x -> %x\n", config.graph_address, target );
+                log_info( "Connecting %x -> %x", config.graph_address, target );
 
-                gnw_request_connect( rfd, config.graph_address, target );
+                gnw_request_connect( rfd, config.graph_address, target );*/
+                log_warn( "UNIMPLEMENTED: DOWNSTREAM" );
                 break;
             }
 
             case ARG_POLICY: { // Note: This functionality should probably be made in to a call in the gnw_ library -John
-                int rfd = getRouterFD();
+                /*int rfd = getRouterFD();
                 if (rfd == -1) {
-                    fprintf(stderr, "Could not connect to the router. STOP.\n");
+                    log_error( "Could not connect to the router. STOP.");
                     exit(EXIT_FAILURE);
                 }
                 unsigned char buffer[2 + sizeof(gnw_address_t)];
@@ -545,7 +566,8 @@ int main(int argc, char ** argv ) {
 
                 *(gnw_address_t *) (buffer + 2) = config.graph_address;
 
-                gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 2 + sizeof(gnw_address_t));
+                gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 2 + sizeof(gnw_address_t));*/
+                log_warn( "UNIMPLEMENTED: POLICY" );
                 break;
             }
 
@@ -563,10 +585,16 @@ int main(int argc, char ** argv ) {
 
             case 'v':
                 config.arg_verbosity++;
+
+                if( config.arg_verbosity == 2 )
+                    log_setLevel( INFO );
+                else if( config.arg_verbosity == 3 )
+                    log_setLevel( DEBUG );
+
                 break;
 
             default:
-                fprintf( stderr, "Unknown argument: %d\n", indexPtr );
+                log_warn( "Unknown argument: %d, ignored", indexPtr );
         }
     }
 
@@ -580,7 +608,7 @@ int main(int argc, char ** argv ) {
         // Connect now, if we haven't already done so...
         int rfd = getRouterFD();
         if (rfd == -1) {
-            fprintf(stderr, "Could not connect to the router. STOP.\n");
+            log_error( "Could not connect to the router. STOP.");
             exit(EXIT_FAILURE);
         }
 
@@ -603,7 +631,7 @@ int main(int argc, char ** argv ) {
         if( config.arg_immediate ) {
             sink_context_t * null_sink = createNewSink(inner_binary, newArgs, 0);
 
-            write( null_sink->wrap_stdin[0], "Demo text\n", 10 );
+            write( null_sink->wrap_stdin[0], "Demo text\n", 10 ); //<-- What did I do this for? -John
         }
 
         // ToDO: This should wait on data from the router, and pass it to the relevant stream sink
@@ -620,7 +648,7 @@ int main(int argc, char ** argv ) {
             if( !backoff ) {
                 bytes_read = read(rfd, iBuffer, config.network_mtu);
                 if (bytes_read < 0) {
-                    fprintf(stderr, "IO Error, did the router crash?\n");
+                    log_error( "IO Error, did the router crash?" );
                     dropRouterFD();
                     exit(EXIT_FAILURE);
                 }
@@ -636,7 +664,7 @@ int main(int argc, char ** argv ) {
                 unsigned char * payload = (unsigned char *)( iBuffer + sizeof(gnw_header_t) );
 
                 if( header->version != GNW_VERSION )
-                    fprintf( stderr, "WARNING: Router/Client version mismatch, things may break horribly.\n" );
+                    log_warn( "Router/Client version mismatch, things may break horribly." );
 
                 switch( header->type ) {
                     case GNW_DATA: {
@@ -654,13 +682,13 @@ int main(int argc, char ** argv ) {
 
                         // By now, we should always have a valid sink context to work with.
                         if( write( PIPE_WRITE(sink_context->wrap_stdin), payload, header->length ) != header->length )
-                            fprintf( stderr, "WARNING: Unable to push the entire payload to the sink, data has been lost - internal error?\n" );
+                            log_warn( "Unable to push the entire payload to the sink, data has been lost - internal error?" );
 
                         break;
                     }
 
                     default:
-                        fprintf( stderr, "WARNING: Unknown or unexpected message type (%d), skipped.\n", header->type );
+                        log_warn( "Unknown or unexpected message type (%d), skipped.", header->type );
                 }
             }
         }

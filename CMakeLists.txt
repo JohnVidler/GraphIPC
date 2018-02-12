@@ -25,7 +25,7 @@ find_package( Threads )
 
 add_library( Common Log.c Log.h )
 
-add_library( DataStructures lib/RingBuffer.c lib/RingBuffer.h lib/LinkedList.c lib/LinkedList.h lib/BTree.c lib/BTree.h lib/avl.c lib/avl.h)
+add_library( DataStructures lib/RingBuffer.c lib/RingBuffer.h lib/LinkedList.c lib/LinkedList.h lib/avl.c lib/avl.h)
 
 add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h IndexTable.c IndexTable.h NodeTable.c NodeTable.h ForwardTable.h ForwardTable.c)
 target_link_libraries( GraphNetwork m DataStructures )

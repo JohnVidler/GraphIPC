@@ -20,8 +20,8 @@
 #include "IndexTable.h"
 #include "Log.h"
 
-struct avl_table * table;
-pthread_mutex_t table_lock;
+struct avl_table * forward_table;
+pthread_mutex_t forward_table_lock;
 
 edge_t * find_edge_to( edge_t * head, gnw_address_t target ) {
     edge_t * iter = head;
@@ -35,6 +35,7 @@ edge_t * find_edge_to( edge_t * head, gnw_address_t target ) {
 
 void prepend_edge( forward_t * entry, edge_t * edge ) {
     pthread_mutex_lock( &entry->listLock );
+    printf( "Adding edge to entry...\n" );
     edge->next = entry->edgeList;
     entry->edgeList = edge;
     pthread_mutex_unlock( &entry->listLock );
@@ -67,7 +68,7 @@ bool remove_edge( forward_t * entry, edge_t * edge ) {
 }
 
 edge_t * forward_table_get_iterator( gnw_address_t source ) {
-    forward_t * entry = table_find( table, source );
+    forward_t * entry = table_find( forward_table, source );
     if( entry == NULL ) {
         log_error( "Refusing to grant an iterator lock on a non-existent entry! [%08x]", source );
         return NULL;
@@ -77,54 +78,54 @@ edge_t * forward_table_get_iterator( gnw_address_t source ) {
 }
 
 void forward_table_release_iterator( gnw_address_t source ) {
-    forward_t * entry = table_find( table, source );
+    forward_t * entry = table_find( forward_table, source );
     if( entry == NULL ) {
-        log_error( "Attempted to release an interator for an unknown table entry? [%08x]", source );
+        log_error( "Attempted to release an interator for an unknown forward_table entry? [%08x]", source );
         return;
     }
     pthread_mutex_unlock( &entry->listLock );
 }
 
 void forward_table_init() {
-    table = table_create();
-    pthread_mutex_init( &table_lock, NULL );
+    forward_table = table_create();
+    pthread_mutex_init( &forward_table_lock, NULL );
 }
 
 void forward_table_add_edge( gnw_address_t source, gnw_address_t target ) {
-    pthread_mutex_lock( &table_lock );
+    pthread_mutex_lock( &forward_table_lock );
 
     // Get (or create) the forward line for this source address
-    forward_t * entry = table_find( table, source );
+    forward_t * entry = table_find( forward_table, source );
     if( entry == NULL ){
+        printf( "No entry, making a new one\n" );
         entry = malloc( sizeof(forward_t) );
         entry->forward_policy = GNW_POLICY_BROADCAST; // Default to broadcast
         entry->round_robin_ref = NULL;
         pthread_mutex_init( &entry->listLock, NULL );
         entry->edgeList = NULL;
+        table_put( forward_table, source, entry ); // Actually put this new entry in the table - how did I miss this?!
     }
+
+    printf( "Making a new edge [%08x] -> [%08x]\n", source, target );
 
     // Build a new edge
     edge_t * edge = malloc( sizeof(edge_t) );
     edge->context = NULL; // Only fill this out on a retrieval op
     edge->target = target;
     edge->next = NULL;
+    prepend_edge( entry, edge ); // Automatically locks, internally
 
-    pthread_mutex_lock( &entry->listLock );
-    prepend_edge( entry, edge );
-    pthread_mutex_unlock( &entry->listLock );
-
-
-    pthread_mutex_unlock( &table_lock );
+    pthread_mutex_unlock( &forward_table_lock );
 }
 
 void forward_table_remove_edge( gnw_address_t source, gnw_address_t target ) {
-    pthread_mutex_lock( &table_lock );
+    pthread_mutex_lock( &forward_table_lock );
 
     // Get the entry for this source address
-    forward_t * entry = table_find( table, source );
+    forward_t * entry = table_find( forward_table, source );
     if( entry == NULL ) {
         log_warn( "Tried to remove a nonexistent edge [%08x] -> [%08x], did nothing.", source, target );
-        pthread_mutex_unlock( &table_lock );
+        pthread_mutex_unlock( &forward_table_lock );
         return;
     }
 
@@ -132,7 +133,7 @@ void forward_table_remove_edge( gnw_address_t source, gnw_address_t target ) {
     edge_t * edge = find_edge_to( entry->edgeList, target );
     if( edge == NULL ) {
         log_warn( "Tried to remove a nonexistent edge [%08x] -> [%08x], did nothing.", source, target );
-        pthread_mutex_unlock( &table_lock );
+        pthread_mutex_unlock( &forward_table_lock );
         return;
     }
 
@@ -141,25 +142,21 @@ void forward_table_remove_edge( gnw_address_t source, gnw_address_t target ) {
     // Attempt to prune this entire entry, if we have no more edges!
     pthread_mutex_lock( &entry->listLock ); // Never unlock, we're killing this entry
     if( entry->edgeList == NULL ) {
-        table_remove( table, source );
+        table_remove( forward_table, source );
         free( entry );
     }
 
-    pthread_mutex_unlock( &table_lock );
+    pthread_mutex_unlock( &forward_table_lock );
 }
 
 forward_t * forward_table_find( gnw_address_t source ) {
-    pthread_mutex_lock( &table_lock );
-    forward_t * entry = table_find( table, source );
-    pthread_mutex_unlock( &table_lock );
-
-    return entry;
+    return table_find( forward_table, source );
 }
 
 void forward_table_remove( gnw_address_t source ) {
-    pthread_mutex_lock( &table_lock );
+    pthread_mutex_lock( &forward_table_lock );
 
-    forward_t * entry = table_find( table, source );
+    forward_t * entry = table_find( forward_table, source );
 
     // Repeatedly remove edges until there are none left.
     pthread_mutex_lock( &entry->listLock ); // Never unlock, we're killing this entry
@@ -167,9 +164,9 @@ void forward_table_remove( gnw_address_t source ) {
         remove_edge( entry, entry->edgeList );
     }
 
-    // Remove the entry in the index'd table
-    table_remove( table, source );
+    // Remove the entry in the index'd forward_table
+    table_remove( forward_table, source );
     free( entry );
 
-    pthread_mutex_unlock( &table_lock );
+    pthread_mutex_unlock( &forward_table_lock );
 }

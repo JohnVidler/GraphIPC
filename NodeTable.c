@@ -21,36 +21,36 @@
 #include "IndexTable.h"
 #include "Log.h"
 
-struct avl_table * table;
-pthread_mutex_t table_mutex;
+struct avl_table * node_table;
+pthread_mutex_t node_table_mutex;
 
 void node_table_init() {
-    table = table_create();
-    pthread_mutex_init( &table_mutex, NULL );
+    node_table = table_create();
+    pthread_mutex_init( &node_table_mutex, NULL );
 }
 
 void node_table_add( gnw_address_t address, void * context ) {
-    pthread_mutex_lock( &table_mutex );
+    pthread_mutex_lock( &node_table_mutex );
     void * oldContext = node_table_find( address );
     if( oldContext != NULL )
         log_warn( "New address %08x overwrites a previous context - remove old nodes first, otherwise linkage might break internally!", address );
-    table_put( table, address, context );
-    pthread_mutex_unlock( &table_mutex );
+    table_put( node_table, address, context );
+    pthread_mutex_unlock( &node_table_mutex );
 }
 
 void * node_table_remove( gnw_address_t address ) {
-    pthread_mutex_lock( &table_mutex );
-    void * context = table_remove( table, address );
-    pthread_mutex_unlock( &table_mutex );
+    pthread_mutex_lock( &node_table_mutex );
+    void * context = table_remove( node_table, address );
+    pthread_mutex_unlock( &node_table_mutex );
     return context;
 }
 
 // Note: Does not lock the table mutex! Avoid modifying the table while find() could be running!
 void * node_table_find( gnw_address_t address ) {
-    return table_find( table, address );
+    return table_find( node_table, address );
 }
 
 // Just a plain IndexTable proxy...
 void node_table_walk( void (*handler)(uint32_t, void *) ) {
-    table_walk( table, handler );
+    table_walk( node_table, handler );
 }
