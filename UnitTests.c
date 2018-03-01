@@ -171,7 +171,6 @@ void test_btree() {
 }
 
 int main(int argc, char * argv ) {
-
     setReportAssert( false );
     setExitOnAssert( true );
 
