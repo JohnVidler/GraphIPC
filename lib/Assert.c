@@ -55,12 +55,12 @@ bool _assertj( bool state, char * errorMessage, void (* jumpTarget)(char *, int)
 
 bool _assertEqual( uint64_t a, uint64_t b, char * file, int line ) {
     if( reportAssertCalls ) {
-        printf("%s:%u\tASSERT-EQUAL? '%llu' == '%llu' -> %s\n", file, line, a, b, (a == b ? "True" : "False"));
+        printf("%s:%u\tASSERT-EQUAL? '%lu' == '%lu' -> %s\n", file, line, a, b, (a == b ? "True" : "False"));
         fflush( stdout );
     }
 
     if( a != b ) {
-        fprintf( stderr, "%s:%u\tASSERT-EQUAL: '%llu' was not equal to '%llu'\n", file, line, a, b );
+        fprintf( stderr, "%s:%u\tASSERT-EQUAL: '%lu' was not equal to '%lu'\n", file, line, a, b );
         fflush( stderr );
 
         if( bailOnAssertFail )

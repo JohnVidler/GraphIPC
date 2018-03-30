@@ -318,6 +318,8 @@ void * clientProcess( void * _context ) {
             uint32_t        packet_length  = sizeof( gnw_header_t ) + packet_header->length;
             unsigned char * packet_payload = (unsigned char *)( iBuffer + sizeof(gnw_header_t) );
 
+            log_debug( "RX: Type = %x, Length = %u", packet_header->type, packet_header->length );
+
             switch( packet_header->type ) {
                 case GNW_DATA: {
                     // Check out any edges for this source...
@@ -629,41 +631,46 @@ int router_process() {
     return EXIT_SUCCESS;
 }
 
-#define ARG_STATUS     0
-#define ARG_POLICY     1
-#define ARG_CONNECT    2
-#define ARG_DISCONNECT 3
-#define ARG_SOURCE     4
-#define ARG_TARGET     5
+#define ARG_HELP       0
+#define ARG_STATUS     1
+#define ARG_POLICY     2
+#define ARG_CONNECT    3
+#define ARG_DISCONNECT 4
+#define ARG_SOURCE     5
+#define ARG_TARGET     6
+#define ARG_MTU        7
+#define ARG_DOT        8
 
 int main(int argc, char ** argv ) {
 
     setExitOnAssert( true ); // Crash out on assertion failures!
 
-    log_setLevel( DEBUG );
+    log_setLevel( ERROR );
 
     config.network_mtu = getIFaceMTU( "lo" );
     config.system_state = SYSTEM_ACTIVE;
     config.verbosity = 0;
 
     if( config.network_mtu == -1 ) {
-        fprintf( stderr, "Unable to query the local interface MTU, defaulting to 1500\n" );
-        //config.network_mtu = 4096;
+        log_error( "Unable to query the local interface MTU, guessing 1500 bytes\n" );
         config.network_mtu = 1500;
     }
-    fprintf( stderr, "Network MTU detected as %d B\n", config.network_mtu );
+    log_debug( "Network MTU detected as %d B\n", config.network_mtu );
 
     // If we have any arguments, assume that this is a remote command.
     if( argc > 1 ) {
         int rfd = socket_connect( "127.0.0.1", ROUTER_PORT ); // Assume local, for now.
 
-        struct option longOptions[7] = {
+        struct option longOptions[9] = {
+                [ARG_HELP] =       { .name="help",       .has_arg=no_argument,       .flag=NULL },
                 [ARG_STATUS] =     { .name="status",     .has_arg=no_argument,       .flag=NULL },
                 [ARG_POLICY] =     { .name="policy",     .has_arg=required_argument, .flag=NULL },
                 [ARG_CONNECT] =    { .name="connect",    .has_arg=no_argument,       .flag=NULL },
                 [ARG_DISCONNECT] = { .name="disconnect", .has_arg=no_argument,       .flag=NULL },
                 [ARG_SOURCE] =     { .name="source",     .has_arg=required_argument, .flag=NULL },
                 [ARG_TARGET] =     { .name="target",     .has_arg=required_argument, .flag=NULL },
+                [ARG_MTU] =        { .name="mtu",        .has_arg=required_argument, .flag=NULL },
+                [ARG_DOT] =        { .name="dot",        .has_arg=no_argument,       .flag=NULL },
                 0
         };
 
@@ -673,7 +680,7 @@ int main(int argc, char ** argv ) {
         // Argument Parsing //
         int arg;
         int indexPtr = 0;
-        while ((arg = getopt_long(argc, argv, "d", longOptions, &indexPtr)) != -1) {
+        while ((arg = getopt_long(argc, argv, "cdhp:s:t:v", longOptions, &indexPtr)) != -1) {
 
             // If we have a short arg, pass it over to the long arg index.
             // Note: This will work assuming we have less than 65(?) long arguments... I think -John.
@@ -681,6 +688,25 @@ int main(int argc, char ** argv ) {
                 indexPtr = arg;
 
             switch (indexPtr) {
+                case 'h':
+                case ARG_HELP: {
+                    printf("GraphWrap\n");
+                    printf(ANSI_COLOR_GREEN "\t\t\"Don't cross the streams\" --Egon Spengler.\n\n" ANSI_COLOR_RESET);
+                    printf("The userspace router for GraphIPC messaging\n\n");
+                    printf(ANSI_COLOR_CYAN "--help -h\n" ANSI_COLOR_RESET "\tShow this help message\n\n");
+                    printf(ANSI_COLOR_CYAN "--status\n" ANSI_COLOR_RESET "\tRequest a status message from a running router instance\n\n");
+                    printf(ANSI_COLOR_CYAN "--policy\n" ANSI_COLOR_RESET "\tChange the link policy between --source and --target\n\n");
+                    printf(ANSI_COLOR_CYAN "--connect -c\n" ANSI_COLOR_RESET "\tConnect --source to --target, with default (broadcast) policy\n\n");
+                    printf(ANSI_COLOR_CYAN "--disconnect -d\n" ANSI_COLOR_RESET "\tDisconnect --source from --target\n\n");
+                    printf(ANSI_COLOR_CYAN "--source -s\n" ANSI_COLOR_RESET "\tThe source address of the arc to modify\n\n");
+                    printf(ANSI_COLOR_CYAN "--target -t\n" ANSI_COLOR_RESET "\tThe target address of the arc or node to modify\n\n");
+                    printf(ANSI_COLOR_CYAN "--mtu\n" ANSI_COLOR_RESET "\tForce a particular MTU - settings this too high may cause excessive packet loss!\n\n");
+                    printf(ANSI_COLOR_CYAN "--dot\n" ANSI_COLOR_RESET "\tOutput the connectome in DOT format periodically, rather than status messages or the address table\n\n");
+                    printf(ANSI_COLOR_CYAN "-v\n" ANSI_COLOR_RESET "\tIncrease log verbosity, each instance increases the log level (Default: ERROR only). Must be called first to have effect\n\n");
+                    //printf(ANSI_COLOR_CYAN "--FLAG\n" ANSI_COLOR_RESET "\tDESCRIPTION\n\n");
+                    return EXIT_SUCCESS;
+                }
+
                 case ARG_STATUS: {
                     unsigned char buffer[1] = { GNW_CMD_STATUS };
                     gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 1);
@@ -689,6 +715,7 @@ int main(int argc, char ** argv ) {
                     return EXIT_SUCCESS;
                 }
 
+                case 'p':
                 case ARG_POLICY: {
                     unsigned char buffer[2 + sizeof(gnw_address_t)];
                     *buffer = GNW_CMD_POLICY;
@@ -708,6 +735,7 @@ int main(int argc, char ** argv ) {
                     return EXIT_SUCCESS;
                 }
 
+                case 'c':
                 case ARG_CONNECT: {
                     printf( "Connect!\n" );
                     unsigned char buffer[1 + (sizeof(gnw_address_t)*2) ];
@@ -726,6 +754,7 @@ int main(int argc, char ** argv ) {
                     return EXIT_SUCCESS;
                 }
 
+                case 'd':
                 case ARG_DISCONNECT: {
                     unsigned char buffer[1] = {GNW_CMD_DISCONNECT};
                     gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 1);
@@ -734,10 +763,35 @@ int main(int argc, char ** argv ) {
                     return EXIT_SUCCESS;
                 }
 
-                case ARG_SOURCE: arg_source_address = strtoul( optarg, NULL, 16 ); break;
-                case ARG_TARGET: arg_target_address = strtoul( optarg, NULL, 16 ); break;
+                case 's':
+                case ARG_SOURCE:
+                    arg_source_address = (gnw_address_t )strtoul( optarg, NULL, 16 );
+                    log_debug( "Source address = %lx", arg_source_address );
+                    break;
 
-                case 'd': config.arg_dot = true; break;
+                case 't':
+                case ARG_TARGET:
+                    arg_target_address = (gnw_address_t )strtoul( optarg, NULL, 16 );
+                    log_debug( "Target address = %lx", arg_target_address );
+                    break;
+
+                case ARG_MTU:
+                    config.network_mtu = (signed)strtoul( optarg, NULL, 10 );
+                    log_warn( "Manually setting the network MTU to %d... this may make everything break!", config.network_mtu );
+                    break;
+
+                case ARG_DOT: config.arg_dot = true; break;
+
+                case 'v':
+                    config.verbosity++;
+
+                    log_debug( "Log verbosity = %d...", config.verbosity );
+
+                    if (config.verbosity == 1)
+                        log_setLevel(INFO);
+                    else if (config.verbosity == 2)
+                        log_setLevel(DEBUG);
+                    break;
 
                 default:
                     fprintf(stderr, "Bad command combination. STOP.");

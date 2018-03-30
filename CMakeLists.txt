@@ -11,7 +11,7 @@ find_package( Doxygen REQUIRED dot )
 
 if( DOXYGEN_FOUND )
     set( DOXYGEN_GENERATE_HTML YES )
-    set( DOXYGEN_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/doc )
+    set( DOXYGEN_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/doc )
 
     doxygen_add_docs( doxygen ${PROJECT_SOURCE_DIR} COMMENT "Generate HTML documentation" )
 endif( DOXYGEN_FOUND )

@@ -26,6 +26,7 @@
 #include <getopt.h>
 #include <pthread.h>
 #include <wait.h>
+#include <fcntl.h>
 #include "lib/GraphNetwork.h"
 #include "common.h"
 #include "lib/LinkedList.h"
@@ -38,6 +39,15 @@
 
 #define PROCESS_OUT 0
 
+#define MAX_INPUT_STREAMS 256
+#define IGNORE_FD (-1)
+
+#define MUX_AUTO_SPAWN 0
+#define MUX_MERGE 1
+
+#define DEMUX_NOOP 0
+#define DEMUX_DROP 1
+
 extern char **environ;
 
 // Configurable Options //
@@ -47,13 +57,15 @@ struct _configuration {
     RingBuffer_t * rx_buffer;
     gnw_state_t *  parser_context;
 
-    unsigned int   arg_model;
+    unsigned char  arg_mux_policy;
+    unsigned char  arg_demux_policy;
 
     char *         arg_host;
     char *         arg_port;
     gnw_address_t  arg_address;
     bool           arg_immediate;
     unsigned int   arg_verbosity;
+    bool           arg_echo;
 };
 struct _configuration config;
 
@@ -66,6 +78,26 @@ typedef struct {
     char * binary;
     char ** binary_arguments;
 } sink_context_t;
+
+typedef struct {
+    sink_context_t ** forward;
+    uint8_t round_robin_index;
+    bool ignore_sub_stream;
+} mux_t;
+
+typedef struct {
+    sink_context_t ** collect;
+    bool ignore_sub_stream;
+} demux_t;
+
+sink_context_t * substream_table[MAX_INPUT_STREAMS] = { NULL };
+
+// This can only ever grow, due to internal constraints, which is unfortunate...
+struct pollfd    stream_fd[MAX_INPUT_STREAMS];
+int stream_fd_count = 0;
+
+volatile unsigned char nextLocalAddress = 0;
+
 linked_list_t * sink_context_list;
 pthread_mutex_t sink_context_list_mutex;
 
@@ -132,8 +164,8 @@ gnw_address_t getNodeAddress( gnw_address_t try_address ) {
                             if( new_address == 0 ) {
                                 new_address = *(gnw_address_t *)(payload + 1);
 
-                                if( new_address != try_address )
-                                    log_warn( "Router refused our address request, actually got %08x", new_address );
+                                if( new_address != try_address && try_address != 0 )
+                                    log_warn( "Router refused our address request for %08x, actually got %08x", try_address, new_address );
                             }
                             break;
 
@@ -167,99 +199,26 @@ int dropRouterFD() {
         free(config.parser_context);
         close(router_fd);
     }
+    return -1;
 }
 
-int mode_input() {
-    int data_fd = getRouterFD();
-
-    // Become a node (aka. get an address)
-    gnw_address_t node_address = getNodeAddress( config.arg_address );
-
-    // Reset the request for an address, irrespective if we got it or not, otherwise we'll keep asking for the same one
-    config.arg_address = 0;
-
-    struct pollfd watch_fd[1];
-    memset( watch_fd, 0, sizeof( struct pollfd ) );
-
-    watch_fd[0].fd = STDIN_FILENO;
-    watch_fd[0].events = POLLIN;
-
-    char buffer[config.network_mtu];
-
-    int rv = 0;
-    while( (rv = poll(watch_fd, 1, 1000)) != -1 ) {
-        if( rv > 0 ) {
-            watch_fd[0].revents = 0;
-
-            memset( buffer, 0, config.network_mtu );
-            ssize_t readBytes = read( watch_fd[0].fd, buffer, config.network_mtu );
-
-            if( readBytes == 0 ) {
-                log_error( "Input shut down, stopping." );
-                break;
-            }
-
-            gnw_emitDataPacket( data_fd, node_address, buffer, readBytes );
-        }
+int addNewWatch( int fd ) {
+    int index = 0;
+    while( stream_fd[index].fd != IGNORE_FD ) {
+        index++;
     }
+    stream_fd[index].fd = fd;
+    stream_fd[index].events = POLLIN;
 
-    // Done, close the FD
-    dropRouterFD();
-    return EXIT_SUCCESS;
+    stream_fd_count++;
+
+    return index;
 }
 
-int mode_output() {
-    int data_fd = getRouterFD();
+void configure_stdin_input() {
+    int watchIndex = addNewWatch( STDIN_FILENO ); // Add STDIN to the input watch list
 
-    // Become a node (aka. get an address)
-    gnw_address_t node_address = getNodeAddress( config.arg_address );
-
-    // Reset the request for an address, irrespective if we got it or not, otherwise we'll keep asking for the same one
-    config.arg_address = 0;
-
-    struct pollfd watch_fd[1];
-    memset( watch_fd, 0, sizeof( struct pollfd ) );
-
-    watch_fd[0].fd = data_fd;
-    watch_fd[0].events = POLLIN;
-
-    char buffer[config.network_mtu+1]; // This '+1' is here to always have a null terminator in the line marked 'kludge' below...
-
-    int rv = 0;
-    while( (rv = poll(watch_fd, 1, 1000)) != -1 ) {
-        if( rv > 0 ) {
-            watch_fd[0].revents = 0;
-
-            ssize_t bytesRead = read( watch_fd[0].fd, buffer, config.network_mtu );
-            if( bytesRead <= 0 ) {
-                perror( "read" );
-                log_error( "IO Error, halting! (2)" );
-                return EXIT_FAILURE;
-            }
-            if( ringbuffer_write( config.rx_buffer, buffer, bytesRead ) != bytesRead )
-                log_error( "Buffer overflow! Data loss occurred!" );
-
-            while( gnw_nextPacket( config.rx_buffer, config.parser_context, buffer ) ) {
-                gnw_header_t *header = (gnw_header_t *) buffer;
-                unsigned char *payload = (unsigned char *) (buffer + sizeof(gnw_header_t));
-                *(payload + header->length) = '\0'; // Kludge?
-
-                if (header->version != GNW_VERSION)
-                    log_warn( "Warning! Router/Client version mismatch!" );
-
-                if( header->type == GNW_DATA ) {
-                    fprintf( stdout, "%s", payload );
-                    fflush( stdout );
-                } else {
-                    log_warn( "Warning! Router is emitting non-data packets in data mode!" );
-                }
-            }
-        }
-    }
-
-    // Done, close the FD
-    dropRouterFD();
-    return EXIT_SUCCESS;
+    log_info( "Now watching for input from STDIN on %d\n", watchIndex );
 }
 
 /**
@@ -334,7 +293,7 @@ void * sink_thread( void * _context ) {
 
             // Handle any events on the process output
             if( watch_fd[0].revents != 0 ) {
-                if (watch_fd[0].revents & POLLIN == POLLIN) {
+                if ((watch_fd[0].revents & POLLIN) == POLLIN) {
                     unsigned char buffer[config.network_mtu];
 
                     ssize_t bytesRead = read(watch_fd[0].fd, &buffer, config.network_mtu);
@@ -425,81 +384,129 @@ sink_context_t * createNewSink( char * binary, char ** arguments, gnw_address_t 
     return sink_context;
 }
 
+void handlePacket( int index, gnw_header_t * header, unsigned char * payload ) {
+
+    // Are we in 'output mode' (or otherwise echo'ing)?
+    if( config.arg_echo ) {
+        for (int i = 0; i < header->length; i++) {
+            // Note: using putc here to avoid issues with null terminators and non-printable streams
+            putc(*(payload + i), stdout);
+        }
+    }
+
+    // Virtual MUX Operation
+    switch( config.arg_mux_policy ) {
+        case MUX_AUTO_SPAWN: /* No-op */ break;
+        case MUX_MERGE:
+            header->source = config.arg_address;
+            break;
+        default:
+            log_error( "Bad internal mux policy! [%x]", config.arg_mux_policy );
+    }
+
+    sink_context_t * context = getSinkContext( header->source );
+    if( context == NULL ) {
+
+        if( config.arg_mux_policy == MUX_AUTO_SPAWN ) {
+            //
+        }
+
+        log_warn( "No sink creation policy, and no such address [%x], so dropping the packet!", header->source );
+        log_warn( "Data has been lost" );
+        return;
+    }
+
+    FILE * file = fdopen( PIPE_WRITE(context->wrap_stdin), "w" );
+    size_t written = fwrite( payload, sizeof(unsigned char), header->length, file );
+    if( written != header->length ) {
+        log_warn( "Could not write buffered data to the child process, OS buffer overflow?" );
+        log_warn( "Data has been lost" );
+    }
+    fflush( file );
+}
+
 #define ARG_HELP       0
 #define ARG_USAGE      1
 #define ARG_HOST       2
 #define ARG_PORT       3
 #define ARG_ADDRESS    4
-#define ARG_UPSTREAM   5
-#define ARG_DOWNSTREAM 6
-#define ARG_POLICY     7
-#define ARG_INPUT      8
-#define ARG_OUTPUT     9
-#define ARG_IMMEDIATE  10
+#define ARG_INPUT      5
+#define ARG_OUTPUT     6
+#define ARG_IMMEDIATE  7
 
 int main(int argc, char ** argv ) {
+    // Initial states
+    for( int i=0; i<256; i++ ) {
+        stream_fd[i].fd = IGNORE_FD; // Ignore every FD, for now
+    }
+
     // Configuration defaults
-    config.network_mtu     = 1500;
-    config.read_timeout    = 5;
+    config.network_mtu  = 1500;
+    config.read_timeout = 5;
 
     config.arg_host = "127.0.0.1";
     config.arg_port = (char *) ROUTER_PORT;
 
-    config.arg_address = 0;
+    config.arg_mux_policy   = MUX_AUTO_SPAWN;
+    config.arg_demux_policy = DEMUX_NOOP;
+
+    config.arg_address   = 0;
     config.arg_immediate = false;
     config.arg_verbosity = 0;
 
+    config.arg_echo = false;
+
     // Check the system MTU and match it - this assumes local operation, for now.
     // Note: Possibly add an override for this in the flags...
-    config.network_mtu = getIFaceMTU( "lo" );
+    config.network_mtu = getIFaceMTU("lo");
+    if (config.network_mtu > 4096) // Excessive copy op.
+        config.network_mtu = 4096;
 
-    if( config.network_mtu > 4096 ) // Excessive copy op.
-        config.network_mtu = 1024;
+    // Build any remaining structures
+    sink_context_list = ll_create();
+    pthread_mutex_init( &sink_context_list_mutex, NULL );
 
+    // Following pragma block is just to prevent gcc complaining about mismatched braces in this structure
+    // apparently, this is a compiler bug! (gcc v7.3.1)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-braces"
     struct option longOptions[12] = {
-            [ARG_HELP]       = { .name="help",       .has_arg=no_argument,       .flag=NULL },
-            [ARG_USAGE]      = { .name="usage",      .has_arg=no_argument,       .flag=NULL },
-            [ARG_HOST]       = { .name="host",       .has_arg=required_argument, .flag=NULL },
-            [ARG_PORT]       = { .name="port",       .has_arg=required_argument, .flag=NULL },
-            [ARG_ADDRESS]    = { .name="address",    .has_arg=required_argument, .flag=NULL },
-            [ARG_UPSTREAM]   = { .name="upstream",   .has_arg=required_argument, .flag=NULL },
-            [ARG_DOWNSTREAM] = { .name="downstream", .has_arg=required_argument, .flag=NULL },
-            [ARG_POLICY]     = { .name="policy",     .has_arg=required_argument, .flag=NULL },
-            [ARG_INPUT]      = { .name="input",      .has_arg=no_argument,       .flag=NULL },
-            [ARG_OUTPUT]     = { .name="output",     .has_arg=no_argument,       .flag=NULL },
-            [ARG_IMMEDIATE]  = { .name="immediate",  .has_arg=no_argument,       .flag=NULL },
+            [ARG_HELP]       = { .name="help",      .has_arg=no_argument,       .flag=NULL },
+            [ARG_USAGE]      = { .name="usage",     .has_arg=no_argument,       .flag=NULL },
+            [ARG_HOST]       = { .name="host",      .has_arg=required_argument, .flag=NULL },
+            [ARG_PORT]       = { .name="port",      .has_arg=required_argument, .flag=NULL },
+            [ARG_ADDRESS]    = { .name="address",   .has_arg=required_argument, .flag=NULL },
+            [ARG_INPUT]      = { .name="input",     .has_arg=no_argument,       .flag=NULL },
+            [ARG_OUTPUT]     = { .name="output",    .has_arg=no_argument,       .flag=NULL },
+            [ARG_IMMEDIATE]  = { .name="immediate", .has_arg=no_argument,       .flag=NULL },
             0
     };
+#pragma GCC diagnostic pop
 
     // Argument Parsing //
     int arg;
     int indexPtr = 0;
-    while ((arg = getopt_long(argc, argv, "u:d:p:h:a:iov", longOptions, &indexPtr)) != -1) {
+    while ((arg = getopt_long(argc, argv, "h:a:iov", longOptions, &indexPtr)) != -1) {
 
         // If we have a short arg, pass it over to the long arg index.
         // Note: This will work assuming we have less than 65(?) long arguments... I think -John.
-        if( arg > 0 )
+        if (arg > 0)
             indexPtr = arg;
 
         switch (indexPtr) {
             case ARG_HELP:
             case ARG_USAGE: // ToDo: Update the argument list with the new argument options
-                printf( "GraphWrap\n" );
-                printf( ANSI_COLOR_GREEN "\t\t\"Don't cross the streams\" --Egon Spengler.\n\n" ANSI_COLOR_RESET );
-                printf( "Wrap a normal Linux process stdin/stdout pipes with GraphIPC connections to a GraphRouter process\nAllows non-compliant programs to be used in a graph\n\n" );
-                printf( ANSI_COLOR_CYAN "--help --usage\n" ANSI_COLOR_RESET "\tShow this help message\n\n" );
-                printf( ANSI_COLOR_CYAN "-h --host [host address]\n" ANSI_COLOR_RESET "\tGraphRouter host address\n\n" );
-                printf( ANSI_COLOR_CYAN "-p --port [port]\n" ANSI_COLOR_RESET "\tGraphRouter port\n\n" );
-                printf( ANSI_COLOR_CYAN "-a --address [hex address]\n" ANSI_COLOR_RESET "\tThe (requested) hexadecimal node address, may not be respected by the router. Cannot be 0\n\n" );
-                printf( ANSI_COLOR_CYAN "-u --upstream [graph address]\n" ANSI_COLOR_RESET "\tConnect this node to the upstream address (receive data from this address).\n\tThis argument can be repeated\n\n" );
-                printf( ANSI_COLOR_CYAN "-d --downstream [graph address]\n" ANSI_COLOR_RESET "\tConnect this node to the downstream address (send data to this address).\n\tThis argument can be repeated\n\n" );
-                printf( ANSI_COLOR_CYAN "--policy [broadcast|anycast|roundrobin]\n" ANSI_COLOR_RESET "\tSet the forward policy for this node\n\n" );
-                printf( ANSI_COLOR_CYAN "--immediate\n" ANSI_COLOR_RESET "\tStart running the inner binary immediately. By default wrapped processes are only started on demand when data arrives\n\n" );
-                printf( ANSI_COLOR_CYAN "-v\n" ANSI_COLOR_RESET "\tIncrease verbosity, repeat for increasing levels of detail\n\n" );
-                printf( ANSI_COLOR_CYAN "--\n" ANSI_COLOR_RESET "\tOptional separator between GraphWrap arguments and the inner binary\n\n" );
-                printf( "The first non-flag argument to this binary will be used as the inner process to wrap.\nAny subsequent arguments are then passed to the inner binary.\n\n" );
-                printf( "Example:\n\tGraphWrap -d 2 -u 1 -- innerProcess --processArg1 -processArg2\n" );
-                break;
+                printf("GraphWrap\n");
+                printf(ANSI_COLOR_GREEN "\t\t\"Don't cross the streams\" --Egon Spengler.\n\n" ANSI_COLOR_RESET);
+                printf("Wrap a normal Linux process stdin/stdout pipes with GraphIPC connections to a GraphRouter process\nAllows non-compliant programs to be used in a graph\n\n");
+                printf(ANSI_COLOR_CYAN "--help --usage\n" ANSI_COLOR_RESET "\tShow this help message\n\n");
+                printf(ANSI_COLOR_CYAN "-h --host [host address]\n" ANSI_COLOR_RESET "\tGraphRouter host address\n\n");
+                printf(ANSI_COLOR_CYAN "-p --port [port]\n" ANSI_COLOR_RESET "\tGraphRouter port\n\n");
+                printf(ANSI_COLOR_CYAN "-a --address [hex address]\n" ANSI_COLOR_RESET "\tThe (requested) hexadecimal node address, may not be respected by the router. Cannot be 0\n\n");
+                printf(ANSI_COLOR_CYAN "--immediate\n" ANSI_COLOR_RESET "\tStart running the inner binary immediately. By default wrapped processes are only started on demand when data arrives\n\n");
+                printf(ANSI_COLOR_CYAN "-v\n" ANSI_COLOR_RESET "\tIncrease verbosity, repeat for increasing levels of detail\n\n");
+                printf(ANSI_COLOR_CYAN "--\n" ANSI_COLOR_RESET "\tOptional separator between GraphWrap arguments and the inner binary\n");
+                return EXIT_SUCCESS;
 
             case 'h':
             case ARG_HOST:
@@ -513,71 +520,18 @@ int main(int argc, char ** argv ) {
 
             case 'a':
             case ARG_ADDRESS:
-                config.arg_address = (gnw_address_t)strtoul( optarg, NULL, 16 );
+                config.arg_address = (gnw_address_t) strtoul(optarg, NULL, 16);
                 break;
-
-            case 'u':
-            case ARG_UPSTREAM: {
-                /*int rfd = getRouterFD();
-                if (rfd == -1) {
-                    log_error( "Could not connect to the router. STOP.");
-                    exit(EXIT_FAILURE);
-                }
-                gnw_address_t target = (gnw_address_t)strtoul( optarg, NULL, 16 );
-
-                log_info( "Connecting %x -> %x", target, config.graph_address );
-
-                gnw_request_connect( rfd, target, config.graph_address );*/
-                log_warn( "UNIMPLEMENTED: UPSTREAM" );
-                break;
-            }
-
-            case 'd':
-            case ARG_DOWNSTREAM: {
-                /*int rfd = getRouterFD();
-                if (rfd == -1) {
-                    log_error( "Could not connect to the router. STOP.");
-                    exit(EXIT_FAILURE);
-                }
-                gnw_address_t target = (gnw_address_t)strtoul( optarg, NULL, 16 );
-
-                log_info( "Connecting %x -> %x", config.graph_address, target );
-
-                gnw_request_connect( rfd, config.graph_address, target );*/
-                log_warn( "UNIMPLEMENTED: DOWNSTREAM" );
-                break;
-            }
-
-            case ARG_POLICY: { // Note: This functionality should probably be made in to a call in the gnw_ library -John
-                /*int rfd = getRouterFD();
-                if (rfd == -1) {
-                    log_error( "Could not connect to the router. STOP.");
-                    exit(EXIT_FAILURE);
-                }
-                unsigned char buffer[2 + sizeof(gnw_address_t)];
-                *buffer = GNW_CMD_POLICY;
-
-                if (strncmp(optarg, "broadcast", 9) == 0)
-                    *(buffer + 1) = GNW_POLICY_BROADCAST;
-                else if (strncmp(optarg, "roundrobin", 10) == 0)
-                    *(buffer + 1) = GNW_POLICY_ROUNDROBIN;
-                else if (strncmp(optarg, "anycast", 7) == 0)
-                    *(buffer + 1) = GNW_POLICY_ANYCAST;
-
-                *(gnw_address_t *) (buffer + 2) = config.graph_address;
-
-                gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 2 + sizeof(gnw_address_t));*/
-                log_warn( "UNIMPLEMENTED: POLICY" );
-                break;
-            }
 
             case 'i':
             case ARG_INPUT:
-                return mode_input();
+                configure_stdin_input();
+                break;
 
             case 'o':
             case ARG_OUTPUT:
-                return mode_output();
+                config.arg_echo = true;
+                break;
 
             case ARG_IMMEDIATE:
                 config.arg_immediate = true;
@@ -586,31 +540,113 @@ int main(int argc, char ** argv ) {
             case 'v':
                 config.arg_verbosity++;
 
-                if( config.arg_verbosity == 2 )
-                    log_setLevel( INFO );
-                else if( config.arg_verbosity == 3 )
-                    log_setLevel( DEBUG );
+                if (config.arg_verbosity == 2)
+                    log_setLevel(INFO);
+                else if (config.arg_verbosity == 3)
+                    log_setLevel(DEBUG);
 
                 break;
 
             default:
-                log_warn( "Unknown argument: %d, ignored", indexPtr );
+                // Note - This probably won't ever happen, as unknown arguments are assumed to be for the binary
+                //        target, rather than ourselves :/
+                log_warn("Unknown argument: %d, ignored", indexPtr);
         }
     }
 
-    // If we have other arguments to parse, then we can assume we're actually wrapping a process now.
-    if( argc - optind > 0 ) {
+    log_debug( "Going live!" );
+    int rfd = getRouterFD();
+    addNewWatch( rfd );
 
-        // Going live, build any remaining structures
-        sink_context_list = ll_create();
-        pthread_mutex_init( &sink_context_list_mutex, NULL );
+    gnw_address_t assigned_address = getNodeAddress( config.arg_address );
+    config.arg_address = assigned_address;
 
-        // Connect now, if we haven't already done so...
-        int rfd = getRouterFD();
-        if (rfd == -1) {
-            log_error( "Could not connect to the router. STOP.");
-            exit(EXIT_FAILURE);
+    log_debug( "Beginning poll of all known FDs..." );
+    gnw_state_t gnw_state;
+    memset( &gnw_state, 0, sizeof(gnw_state) );
+
+    int status = 0;
+    while( status == 0 ) {
+        int rv = -1;
+        while( status == 0 && (rv = poll(stream_fd, stream_fd_count, 100)) != -1 ) {
+            int index = 0;
+            while( rv > 0 && index < MAX_INPUT_STREAMS ) {
+                if( stream_fd[index].revents != 0 ) {
+
+                    unsigned char iBuffer[config.network_mtu];
+                    memset( iBuffer, 0, config.network_mtu ); // This will cause slowdown, but is safer this way.
+
+                    ssize_t readBytes = read(stream_fd[index].fd, iBuffer, config.network_mtu);
+                    if( readBytes < 1 ) {
+                        log_warn( "Stream %d closed unexpectedly", index );
+
+                        if( stream_fd[index].fd == rfd ) {
+                            log_error( "Router closed our connection! Also closing down..." );
+                            status = 1; // Mark us for shutdown.
+                        }
+
+                        stream_fd[index].fd = -1;
+                    }
+
+                    else if( readBytes > 0 ) {
+                        // Is this the router FD?
+                        if( stream_fd[index].fd == rfd ) {
+                            printf("Read %ldB from Router\n", readBytes);
+
+                            if( ringbuffer_write( config.rx_buffer, iBuffer, readBytes ) != readBytes )
+                                log_warn( "Receive buffer overflow! Data has been lost!" );
+
+                            unsigned char packet_buffer[config.network_mtu + 1];
+                            memset( packet_buffer, 0, config.network_mtu + 1 );
+                            if( gnw_nextPacket( config.rx_buffer, &gnw_state, packet_buffer ) ) {
+                                gnw_header_t * header = (gnw_header_t *) packet_buffer;
+                                unsigned char * payload = packet_buffer + sizeof( gnw_header_t );
+
+                                handlePacket( index, header, payload );
+                            }
+
+                        }
+
+                        // Is this stdin?
+                        else if( stream_fd[index].fd == STDIN_FILENO ) {
+                            printf("Read %ldB from STDIN\n", readBytes);
+
+                            gnw_emitDataPacket( rfd, config.arg_address, iBuffer, readBytes );
+                        }
+                    }
+
+                    stream_fd[index].revents = 0;
+                    rv--; // Deduct one remaining fd
+                }
+
+                index++; // Walk to the next available fd
+            }
+
+            if( rv > 0 )
+                log_warn( "Notified of stream events, but could not find a corresponding FD? Something is going very wrong!" );
         }
+
+    }
+
+    // Close our router connection, if we still have one...
+    log_info( "Closing router connection..." );
+    if( fcntl( rfd, F_GETFD ) != -1 ) {
+        close(rfd);
+    }
+
+    log_info( "Shutting down any open FDs..." );
+    for( int i=0; i<MAX_INPUT_STREAMS; i++ ) {
+        if( fcntl( stream_fd[i].fd, F_GETFD ) != -1 ) {
+            log_debug( "Closing %d...", stream_fd[i].fd );
+            close(stream_fd[i].fd);
+        }
+    }
+
+    return EXIT_SUCCESS;
+}
+
+/*    // If we have other arguments to parse, then we can assume we're actually wrapping a process now.
+    if( argc - optind > 0 ) {
 
         const int inner_binary_index = optind;
         const int inner_binary_argc = argc - optind;
@@ -698,4 +734,4 @@ int main(int argc, char ** argv ) {
     dropRouterFD();
 
     return EXIT_SUCCESS;
-}
+}*/

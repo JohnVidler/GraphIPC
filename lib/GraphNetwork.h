@@ -87,10 +87,11 @@ typedef struct {
     uint8_t       version;
     uint8_t       type;
     gnw_address_t source;
+    gnw_address_t target;
     uint32_t      length;
 } gnw_header_t;
 
-void gnw_format_address( unsigned char * buffer, uint64_t address );
+void gnw_format_address( char * buffer, uint64_t address );
 
 void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length );
 

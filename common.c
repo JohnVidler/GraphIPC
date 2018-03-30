@@ -105,7 +105,7 @@ int getIFaceMTU( const char * interface ) {
 void findRealPath( char * target, const char * binary ) {
     char pathBuffer[2048] = { 0 };
     size_t env_path_length = strlen( getenv( "PATH" ) );
-    char * path = (char *)malloc( env_path_length + 1 );
+    char * path = alloca( env_path_length + 1 );
     memcpy( path, getenv( "PATH" ), env_path_length );
 
     char * parent = strtok( path, ":" );
@@ -124,5 +124,4 @@ void findRealPath( char * target, const char * binary ) {
 
     // Guess we must have an actual path already...
     sprintf( target, "%s", binary );
-    free( path );
 }

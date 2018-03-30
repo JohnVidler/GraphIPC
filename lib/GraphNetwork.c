@@ -35,7 +35,7 @@ volatile gnw_stats_t link_stats;
  * @param buffer The buffer to write in to
  * @param address The 64-bit address to write
  */
-void gnw_format_address( unsigned char * buffer, uint64_t address ) {
+void gnw_format_address( char * buffer, uint64_t address ) {
     uint8_t * tmp = (uint8_t *) &address;
     for( int i=7; i>-1; i-- ) {
         buffer = buffer + sprintf( buffer, "%02x", *(tmp+i) );
@@ -86,7 +86,7 @@ void gnw_emitPacket( int fd, unsigned char * buffer, size_t length ) {
     link_stats.bytesWritten += written;
 }
 
-void gnw_emitDataPacket( int fd, gnw_address_t source,  unsigned char * buffer, ssize_t length ) {
+void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, ssize_t length ) {
     link_stats.dataPackets++;
     unsigned char * packet = (unsigned char *)malloc( length + sizeof(gnw_header_t) );
     ((gnw_header_t *)packet)->magic    = GNW_MAGIC;
