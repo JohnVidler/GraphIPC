@@ -18,7 +18,6 @@
 #pragma once
 
 #include <stdint.h>
-#include <unitypes.h>
 #include "lib/avl.h"
 
 typedef struct entry {
