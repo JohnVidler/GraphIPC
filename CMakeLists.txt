@@ -25,13 +25,13 @@ link_directories(${GLIB_LIBRARY_DIRS})
 find_package( Threads )
 
 # Build specific data to build dynamic includes
-execute_process( COMMAND git rev-parse --short HEAD OUTPUT_VARIABLE GIT_SHORT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE )
+execute_process( COMMAND "git rev-parse --short HEAD" OUTPUT_VARIABLE GIT_SHORT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE )
 add_definitions( -DGIT_SHORT_HASH=${GIT_SHORT_HASH} )
 
-execute_process( COMMAND git rev-parse HEAD OUTPUT_VARIABLE GIT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE )
+execute_process( COMMAND "git rev-parse HEAD" OUTPUT_VARIABLE GIT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE )
 add_definitions( -DGIT_HASH=${GIT_HASH} )
 
-execute_process( COMMAND git name-rev --tags --name-only $(git rev-parse HEAD) OUTPUT_VARIABLE GIT_TAG OUTPUT_STRIP_TRAILING_WHITESPACE )
+execute_process( COMMAND "git name-rev --tags --name-only $(git rev-parse HEAD)" OUTPUT_VARIABLE GIT_TAG OUTPUT_STRIP_TRAILING_WHITESPACE )
 add_definitions( -DGIT_TAG=${GIT_TAG} )
 
 

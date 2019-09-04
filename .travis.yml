@@ -1,0 +1,24 @@
+compiler: gcc
+
+jobs:
+  include:
+    - stage: configure
+      script:
+        - mkdir -p build
+        - cd build
+        - cmake ..
+    
+    - stage: Unit Tests
+      script:
+        - make clean
+        - make UnitTests
+
+    - stage: GraphRouter
+      script:
+        - make clean
+        - make GraphRouter
+    
+    - stage: Graph
+      script:
+        - make clean
+        - make Graph
