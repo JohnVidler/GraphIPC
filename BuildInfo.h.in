@@ -1,0 +1,5 @@
+#pragma once
+
+#define GIT_HASH ("@GIT_HASH@")
+#define GIT_SHORT_HASH ("@GIT_SHORT_HASH@")
+#define GIT_TAG ("@GIT_TAG@")

@@ -87,7 +87,7 @@ typedef struct {
     uint8_t       version;
     uint8_t       type;
     gnw_address_t source;
-    gnw_address_t target;
+    //gnw_address_t target;
     uint32_t      length;
 } gnw_header_t;
 

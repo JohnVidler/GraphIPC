@@ -24,11 +24,25 @@ link_directories(${GLIB_LIBRARY_DIRS})
 # Pthreads/Threads stuff
 find_package( Threads )
 
+# Build specific data to build dynamic includes
+execute_process( COMMAND git rev-parse --short HEAD OUTPUT_VARIABLE GIT_SHORT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE )
+add_definitions( -DGIT_SHORT_HASH=${GIT_SHORT_HASH} )
+
+execute_process( COMMAND git rev-parse HEAD OUTPUT_VARIABLE GIT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE )
+add_definitions( -DGIT_HASH=${GIT_HASH} )
+
+execute_process( COMMAND git name-rev --tags --name-only $(git rev-parse HEAD) OUTPUT_VARIABLE GIT_TAG OUTPUT_STRIP_TRAILING_WHITESPACE )
+add_definitions( -DGIT_TAG=${GIT_TAG} )
+
+
+configure_file( BuildInfo.h.in ${CMAKE_BINARY_DIR}/generated/BuildInfo.h )
+include_directories( ${CMAKE_BINARY_DIR}/generated/ )
+
 add_library( Common Log.c Log.h )
 
 add_library( DataStructures lib/RingBuffer.c lib/RingBuffer.h lib/LinkedList.c lib/LinkedList.h lib/avl.c lib/avl.h)
 
-add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h IndexTable.c IndexTable.h NodeTable.c NodeTable.h ForwardTable.h ForwardTable.c)
+add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h lib/packet.c IndexTable.c IndexTable.h NodeTable.c NodeTable.h ForwardTable.h ForwardTable.c )
 target_link_libraries( GraphNetwork m DataStructures )
 
 add_library( Assert lib/Assert.c lib/Assert.h )

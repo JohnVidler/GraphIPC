@@ -43,7 +43,7 @@ void test_ring_buffer() {
 
     assert( ringbuffer_write( buffer, testString, 12 ) == 0, "This write should have failed, buffer is incapable of holding the data" );
 
-    printf( "Length: %llu\n", ringbuffer_length(buffer) );
+    printf( "Length: %lu\n", ringbuffer_length(buffer) );
     assert(ringbuffer_length(buffer) == 120, "Buffer should have 120B of data at this point." );
 
     for( int i=0; i<20; i++ ) {
@@ -76,7 +76,7 @@ void test_network_sync() {
     unsigned int next = 0;
     gnw_state_t context = { .state=0 };
 
-    for( int i=0; i<200000; i++ ) {
+    for( int i=0; i<2000; i++ ) {
         unsigned char packet[sizeof(gnw_header_t) + 10] = {0};
         do {
             gnw_header_t *packer_header = (gnw_header_t *) packet;
@@ -163,15 +163,15 @@ void test_btree() {
         avl_insert(table, a);
     }
 
-    dummy_t query = { .address = 5 };
+    dummy_t query = { .address = 9 };
     dummy_t * result = avl_find( table, &query );
 
-    assert( result == a, "Return data mismatch" );
+    assert( result == a, "Result != a" );
 
 }
 
-int main(int argc, char * argv ) {
-    setReportAssert( false );
+int main(int argc, char ** argv ) {
+    setReportAssert( true );
     setExitOnAssert( true );
 
     log_setLevel( WARNING );
@@ -182,12 +182,12 @@ int main(int argc, char * argv ) {
     log_write( 3, "Log level 3" );
     log_write( 4, "Log level 4" );
 
-    //test_ring_buffer();
+    test_ring_buffer();
     test_btree();
 
-    //test_network_sync();
+    test_network_sync();
 
-    //test_utility_functions();
+    test_utility_functions();
 
     return EXIT_SUCCESS;
 }

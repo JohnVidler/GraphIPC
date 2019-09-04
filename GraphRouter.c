@@ -32,6 +32,7 @@
 #include "NodeTable.h"
 #include "ForwardTable.h"
 #include "Log.h"
+#include "BuildInfo.h"
 #include <poll.h>
 #include <sys/un.h>
 #include <getopt.h>
@@ -315,7 +316,7 @@ void * clientProcess( void * _context ) {
 
         while( gnw_nextPacket( context->rx_buffer, &parser_context, iBuffer ) ) {
             gnw_header_t *  packet_header  = (gnw_header_t *)iBuffer;
-            uint32_t        packet_length  = sizeof( gnw_header_t ) + packet_header->length;
+            //uint32_t        packet_length  = sizeof( gnw_header_t ) + packet_header->length;
             unsigned char * packet_payload = (unsigned char *)( iBuffer + sizeof(gnw_header_t) );
 
             log_debug( "RX: Type = %x, Length = %u", packet_header->type, packet_header->length );
@@ -329,7 +330,7 @@ void * clientProcess( void * _context ) {
                     if (forward == NULL || forward->edgeList == NULL)
                         break;
 
-                    switch (forward->forward_policy) {
+                    switch (forward->forward_policy) { 
                         case GNW_POLICY_BROADCAST: {
                             pthread_mutex_lock(&forward->listLock);
                             edge_t *iter = forward->edgeList;
@@ -522,14 +523,14 @@ void * clientProcess( void * _context ) {
                             // Try to grab the source context, if any
                             context_t *source = node_table_find(source_address);
                             if (source == NULL) {
-                                fprintf(stderr, "No such valid source address -> %lx\n", source_address);
+                                fprintf(stderr, "No such valid source address -> %ux\n", source_address);
                                 break;
                             }
 
                             // Try to grab the target context, if any
                             context_t *target = node_table_find(target_address);
                             if (target == NULL) {
-                                fprintf(stderr, "No such valid target address -> %lx\n", target_address);
+                                fprintf(stderr, "No such valid target address -> %ux\n", target_address);
                                 break;
                             }
 
@@ -567,13 +568,14 @@ void * status_process( void * notused ) {
 
         sleep( 10 );
     }
+    return NULL; // Should never happen...
 }
 
 int router_process() {
 
     // Set up the socket server
     struct addrinfo listen_hints;
-    int ret;
+    //int ret;
 
     memset( &listen_hints, 0, sizeof listen_hints );
     listen_hints.ai_family   = AF_UNSPEC;
@@ -640,6 +642,7 @@ int router_process() {
 #define ARG_TARGET     6
 #define ARG_MTU        7
 #define ARG_DOT        8
+#define ARG_VERSION    9
 
 int main(int argc, char ** argv ) {
 
@@ -661,7 +664,8 @@ int main(int argc, char ** argv ) {
     if( argc > 1 ) {
         int rfd = socket_connect( "127.0.0.1", ROUTER_PORT ); // Assume local, for now.
 
-        struct option longOptions[9] = {
+#pragma GCC diagnostic ignored "-Wmissing-braces" // This is a GCC bug for initializing structures in an array
+        struct option longOptions[11] = {
                 [ARG_HELP] =       { .name="help",       .has_arg=no_argument,       .flag=NULL },
                 [ARG_STATUS] =     { .name="status",     .has_arg=no_argument,       .flag=NULL },
                 [ARG_POLICY] =     { .name="policy",     .has_arg=required_argument, .flag=NULL },
@@ -671,8 +675,10 @@ int main(int argc, char ** argv ) {
                 [ARG_TARGET] =     { .name="target",     .has_arg=required_argument, .flag=NULL },
                 [ARG_MTU] =        { .name="mtu",        .has_arg=required_argument, .flag=NULL },
                 [ARG_DOT] =        { .name="dot",        .has_arg=no_argument,       .flag=NULL },
+                [ARG_VERSION] =    { .name="version",    .has_arg=no_argument,       .flag=NULL },
                 0
         };
+#pragma GCC diagnostic pop
 
         gnw_address_t arg_source_address = 0;
         gnw_address_t arg_target_address = 0;
@@ -781,6 +787,10 @@ int main(int argc, char ** argv ) {
                     break;
 
                 case ARG_DOT: config.arg_dot = true; break;
+
+                case ARG_VERSION:
+                    printf( "Version: %s (%s)\n", GIT_TAG, GIT_HASH );
+                    return EXIT_SUCCESS;
 
                 case 'v':
                     config.verbosity++;

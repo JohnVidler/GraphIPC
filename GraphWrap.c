@@ -31,6 +31,7 @@
 #include "common.h"
 #include "lib/LinkedList.h"
 #include "Log.h"
+#include "BuildInfo.h"
 
 #define LOG_NAME "GraphWrap"
 
@@ -125,7 +126,7 @@ gnw_address_t getNodeAddress( gnw_address_t try_address ) {
         gnw_sendCommand(router, GNW_CMD_NEW_ADDRESS);
     }
     else {
-        // Bit of a hack - send the requested address with the new address request... Might just be ignored ar the router, though!
+        // Bit of a hack - send the requested address with the new address request... Might just be ignored at the router, though!
         log_info( "Requesting address [%08x] from the router...", try_address );
         unsigned char reqBuffer[sizeof(gnw_address_t)+1] = { GNW_CMD_NEW_ADDRESS, 0 };
         memcpy( reqBuffer+1, &try_address, sizeof(gnw_address_t) );
@@ -143,7 +144,7 @@ gnw_address_t getNodeAddress( gnw_address_t try_address ) {
             log_warn( "Buffer overflow! Data loss occurred!" );
 
         while( gnw_nextPacket( config.rx_buffer, config.parser_context, iBuffer ) ) {
-            gnw_header_t * header = (gnw_header_t *)iBuffer;
+            gnw_header_t * header = (gnw_header_t *)iBuffer; // FIXFIXFIX - this is a terrible way of dealing with this! Should use a packet serializer!
             unsigned char * payload = iBuffer + sizeof(gnw_header_t);
 
             // Uncomment for debug output
@@ -425,6 +426,11 @@ void handlePacket( int index, gnw_header_t * header, unsigned char * payload ) {
     fflush( file );
 }
 
+typedef struct {
+    const char * description;
+    const char * arg;
+} short_args_description_t;
+
 #define ARG_HELP       0
 #define ARG_USAGE      1
 #define ARG_HOST       2
@@ -432,7 +438,10 @@ void handlePacket( int index, gnw_header_t * header, unsigned char * payload ) {
 #define ARG_ADDRESS    4
 #define ARG_INPUT      5
 #define ARG_OUTPUT     6
-#define ARG_IMMEDIATE  7
+#define ARG_MUX        7
+#define ARG_DEMUX      8
+#define ARG_IMMEDIATE  9
+#define ARG_VERSION    10
 
 int main(int argc, char ** argv ) {
     // Initial states
@@ -478,8 +487,25 @@ int main(int argc, char ** argv ) {
             [ARG_ADDRESS]    = { .name="address",   .has_arg=required_argument, .flag=NULL },
             [ARG_INPUT]      = { .name="input",     .has_arg=no_argument,       .flag=NULL },
             [ARG_OUTPUT]     = { .name="output",    .has_arg=no_argument,       .flag=NULL },
+            [ARG_MUX]        = { .name="output",    .has_arg=no_argument,       .flag=NULL },
+            [ARG_DEMUX]      = { .name="output",    .has_arg=no_argument,       .flag=NULL },
             [ARG_IMMEDIATE]  = { .name="immediate", .has_arg=no_argument,       .flag=NULL },
+            [ARG_VERSION]    = { .name="version",   .has_arg=no_argument,       .flag=NULL },
             0
+    };
+    // Purely so descriptions and arguments are managed together in the same block - this could be done purely in the --help/--usage
+    // argument block, but this keeps it sane-ish, even if the syntax is a little odd.
+    short_args_description_t shortOptions[] = {
+        [ARG_HELP]      = { .arg=NULL, .description="Show this help message." },
+        [ARG_USAGE]     = { .arg=NULL, .description="Show this help message." },
+        [ARG_HOST]      = { .arg="h",  .description="Specify a GraphRouter host address (defaults to localhost)." },
+        [ARG_PORT]      = { .arg="p",  .description="Specify a GraphRouter port." },
+        [ARG_ADDRESS]   = { .arg="a",  .description="The (requested) hexadecimal node address, may not be respected by the router. Cannot be 0." },
+        [ARG_INPUT]     = { .arg="i",  .description="Run in input bridge mode; take and input on stdin and forward to the GraphRouter." },
+        [ARG_OUTPUT]    = { .arg="o",  .description="Rung in output bridge mode; take any messages from the GraphRouter and emit them on stdout." },
+        [ARG_IMMEDIATE] = { .arg=NULL, .description="Start running the inner binary immediately. By default wrapped processes are only started on demand when data arrives." },
+        [ARG_VERSION]   = { .arg=NULL, .description="" },
+        0
     };
 #pragma GCC diagnostic pop
 
@@ -499,13 +525,34 @@ int main(int argc, char ** argv ) {
                 printf("GraphWrap\n");
                 printf(ANSI_COLOR_GREEN "\t\t\"Don't cross the streams\" --Egon Spengler.\n\n" ANSI_COLOR_RESET);
                 printf("Wrap a normal Linux process stdin/stdout pipes with GraphIPC connections to a GraphRouter process\nAllows non-compliant programs to be used in a graph\n\n");
-                printf(ANSI_COLOR_CYAN "--help --usage\n" ANSI_COLOR_RESET "\tShow this help message\n\n");
-                printf(ANSI_COLOR_CYAN "-h --host [host address]\n" ANSI_COLOR_RESET "\tGraphRouter host address\n\n");
-                printf(ANSI_COLOR_CYAN "-p --port [port]\n" ANSI_COLOR_RESET "\tGraphRouter port\n\n");
-                printf(ANSI_COLOR_CYAN "-a --address [hex address]\n" ANSI_COLOR_RESET "\tThe (requested) hexadecimal node address, may not be respected by the router. Cannot be 0\n\n");
-                printf(ANSI_COLOR_CYAN "--immediate\n" ANSI_COLOR_RESET "\tStart running the inner binary immediately. By default wrapped processes are only started on demand when data arrives\n\n");
+
+                int offset = 0;
+                while( longOptions[offset].name != 0 ) {
+                    printf( ANSI_COLOR_CYAN );
+
+                    if( shortOptions[offset].arg != NULL )
+                        printf( "-%s ", shortOptions[offset].arg );
+
+                    if( longOptions[offset].name != NULL )
+                        printf( "--%s ", longOptions[offset].name );
+                    
+                    if( longOptions[offset].has_arg == required_argument )
+                        printf( "[required-value]" );
+                    else if( longOptions[offset].has_arg == optional_argument )
+                        printf( "[optoinal-value]" );
+                    
+                    printf( "\n" );
+
+                    if( shortOptions[offset].description != NULL )
+                        printf( ANSI_COLOR_RESET "\t%s\n\n", shortOptions[offset].description );
+                    
+                    offset++;
+                }
                 printf(ANSI_COLOR_CYAN "-v\n" ANSI_COLOR_RESET "\tIncrease verbosity, repeat for increasing levels of detail\n\n");
                 printf(ANSI_COLOR_CYAN "--\n" ANSI_COLOR_RESET "\tOptional separator between GraphWrap arguments and the inner binary\n");
+
+                printf( ANSI_COLOR_RESET );
+                
                 return EXIT_SUCCESS;
 
             case 'h':
@@ -536,6 +583,10 @@ int main(int argc, char ** argv ) {
             case ARG_IMMEDIATE:
                 config.arg_immediate = true;
                 break;
+
+            case ARG_VERSION:
+                printf( "Version: #%s\n", GIT_HASH );
+                return EXIT_SUCCESS;
 
             case 'v':
                 config.arg_verbosity++;
