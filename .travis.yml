@@ -4,25 +4,11 @@ before_install:
   - sudo apt-get update
   - sudo apt-get install -y doxygen graphviz
 
-jobs:
-  include:
-    - stage: configure
-      script:
-        - mkdir -p build
-        - cd build
-        - cmake ..
-    
-    - stage: Unit Tests
-      script:
-        - make clean
-        - make UnitTests
-
-    - stage: GraphRouter
-      script:
-        - make clean
-        - make GraphRouter
-    
-    - stage: Graph
-      script:
-        - make clean
-        - make Graph
+script:
+  - mkdir -p build
+  - cd build
+  - cmake ..
+  - make clean
+  - make UnitTests
+  - make GraphRouter
+  - make Graph
