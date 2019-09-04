@@ -4,7 +4,7 @@ project( GraphIPC )
 set( CMAKE_C_STANDARD 99 )
 set( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall" )
 
-find_package(PkgConfig REQUIRED)
+find_package( PkgConfig REQUIRED )
 
 # Doxygen Support
 find_package( Doxygen REQUIRED dot )
@@ -17,9 +17,9 @@ if( DOXYGEN_FOUND )
 endif( DOXYGEN_FOUND )
 
 # glib library stuff
-pkg_check_modules(GLIB REQUIRED glib-2.0>=2.23)
-include_directories(${GLIB_INCLUDE_DIRS})
-link_directories(${GLIB_LIBRARY_DIRS})
+pkg_check_modules( GLIB REQUIRED glib-2.0>=2.23 )
+include_directories( ${GLIB_INCLUDE_DIRS} )
+link_directories( ${GLIB_LIBRARY_DIRS} )
 
 # Pthreads/Threads stuff
 find_package( Threads )

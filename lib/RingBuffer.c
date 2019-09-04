@@ -20,7 +20,6 @@
 #include <semaphore.h>
 #include <stdio.h>
 #include <memory.h>
-#include <unitypes.h>
 #include "Assert.h"
 #include "RingBuffer.h"
 
