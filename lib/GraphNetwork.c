@@ -25,6 +25,7 @@
 #include "GraphNetwork.h"
 #include "RingBuffer.h"
 #include "packet.h"
+#include "../Log.h"
 
 volatile gnw_stats_t link_stats;
 
@@ -100,9 +101,10 @@ void gnw_emitPacket( int fd, unsigned char * buffer, size_t length ) {
 }
 
 void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, ssize_t length ) {
+    log_debug( "Data Packet" );
     link_stats.dataPackets++;
 
-    uint8_t * packet = (uint8_t *)malloc( length + sizeof(gnw_address_t) );
+    uint8_t * packet = (uint8_t *)malloc( length + 11 );
     uint8_t * ptr = packet;
 
     ptr = packet_write_u8( ptr, GNW_MAGIC );
@@ -116,7 +118,7 @@ void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, s
         ptr += length;
     }
 
-    gnw_emitPacket( fd, packet, length + sizeof( gnw_header_t ) );
+    gnw_emitPacket( fd, packet, length + 11 );
 
     free( packet );
 }
@@ -126,9 +128,10 @@ void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, s
          the rule that we're never address zero, have it reserved for the negotiating phase only...? */
 __attribute__((deprecated))
 void gnw_emitCommandPacket( int fd, uint8_t type, unsigned char * buffer, ssize_t length ) {
+    log_debug( "Command Packet" );
     link_stats.commandPackets++;
 
-    uint8_t * packet = (uint8_t *)malloc( length + sizeof(gnw_header_t) );
+    uint8_t * packet = (uint8_t *)malloc( length + 11 );
     uint8_t * ptr = packet;
 
     ptr = packet_write_u8( ptr, GNW_MAGIC );
@@ -142,7 +145,7 @@ void gnw_emitCommandPacket( int fd, uint8_t type, unsigned char * buffer, ssize_
         ptr += length;
     }
 
-    gnw_emitPacket( fd, packet, length + sizeof( gnw_header_t ) );
+    gnw_emitPacket( fd, packet, length + 11 );
 
     free( packet );
 }
@@ -154,78 +157,50 @@ void gnw_sendCommand( int fd, uint8_t command ) {
 
 
 void gnw_request_connect( int fd, gnw_address_t _source, gnw_address_t _target ) {
+    log_debug( "Connect Packet" );
     // Connect to a process automatically :)
-    unsigned char cbuffer[1 + (sizeof(gnw_address_t)*2) ];
+    unsigned char cbuffer[9] = { 0 };
 
     unsigned char * ptr = cbuffer;
     ptr = packet_write_u8( ptr, GNW_CMD_CONNECT );
     ptr = packet_write_u32( ptr, _source );
     ptr = packet_write_u32( ptr, _target );
 
-    gnw_emitCommandPacket( fd, GNW_COMMAND, cbuffer, 1+ (sizeof(gnw_address_t)*2) );
+    gnw_emitCommandPacket( fd, GNW_COMMAND, cbuffer, 9 );
 }
 
 
 #define GNW_PARSE_SYNC   0
 #define GNW_PARSE_BUFFER 1
 
-bool gnw_nextPacket( RingBuffer_t * buffer, gnw_state_t * context, void * packetBuffer ) {
-    unsigned char discard = 0;
+ssize_t gnw_nextPacket( uint8_t * buffer, size_t buffer_length ) {
 
-    switch( context->state ) {
-        case GNW_PARSE_SYNC:
-            while( ringbuffer_length(buffer) > 0 && ringbuffer_peek( buffer, 0 ) != GNW_MAGIC )
-                ringbuffer_read(buffer, &discard, 1);
+    // Is there enough data for a whole valid packet?
+    if( buffer_length < 11 )
+        return 0;
 
-            if( ringbuffer_peek(buffer, 0) != GNW_MAGIC )
-                break;
+    // Reject a parse if there is no magic byte up front.
+    if( buffer[0] != GNW_MAGIC )
+        return -1;
+    
+    // Actually parse stuff
+    gnw_header_t header = { 0 };
+    uint8_t * ptr = buffer;
 
-            // Fall through if we already have a syncronised packet frame, otherwise we end up 1-frame behind the stream!
-            // This is mostly to prevent poll() from blocking if/when we return and the buffer is sync'd but hasn't
-            // actually read the packet yet, this way, it can do both at once!
-            context->state = GNW_PARSE_BUFFER;
+    ptr = packet_read_u8( ptr, &header.magic );
+    ptr = packet_read_u8( ptr, &header.version );
+    ptr = packet_read_u8( ptr, &header.type );
+    ptr = packet_read_u32( ptr, &header.source );
+    ptr = packet_read_u32( ptr, &header.length );
 
-        case GNW_PARSE_BUFFER:
-            if( ringbuffer_peek( buffer, 0 ) != GNW_MAGIC ) {
-                fprintf( stderr, "Missing packet framing, skipping!\n" );
-                ringbuffer_read( buffer, &discard, 1 ); // Shift the ring by 1, hopefully becoming un-stuck
-                context->state = GNW_PARSE_SYNC;
-                break;
-            }
-
-            // Magic must be correct here...
-            if( ringbuffer_peek( buffer, 1 ) != GNW_VERSION ) {
-                fprintf( stderr, "GNW Version mismatch! Old software?\n" );
-                ringbuffer_read( buffer, &discard, 1 ); // Shift the ring by 1, hopefully becoming un-stuck
-                context->state = GNW_PARSE_SYNC;
-                break;
-            }
-
-            // Magic & Version must be correct here, is there enough buffer left over?
-            size_t packet_length = 9 + ringbuffer_peek32( buffer, 7 );
-            if( ringbuffer_length( buffer ) >= packet_length ) {
-                // The buffer has enough data to actually read this packet, so pull the packet and return true
-                if( ringbuffer_read( buffer, packetBuffer, packet_length ) != packet_length ) {
-                    fprintf( stderr, "Err! Could not pull the requested length data (%lu B) from the ring buffer, even though it had enough recorded!\n", packet_length );
-                    break;
-                }
-
-                printf( "\n<<< [ " );
-                for( size_t i = 0; i < packet_length; i++ )
-                    printf( "%02x ", ((unsigned char *)packetBuffer)[i] );
-                printf( "]\n" );
-
-                // Packet copied to the client buffer
-                return true;
-            }
-
-            // If we reach here, we have a valid packet, but its still being reconstructured, leave it be for now.
-            break;
-
-        default:
-            fprintf( stderr, "ERR: GNW packet parser was in an unknown state, reset to SYNC state\n" );
-            context->state = GNW_PARSE_SYNC;
+    // Reject if the packet has a bad Version
+    if( header.version != GNW_VERSION ) {
+        log_error( "Version mismatch! Old/Incorrect router running? (ours = %d, remote = %d)\n", GNW_VERSION, header.version );
+        return -2;
     }
 
-    return false;
+    if( 11 + header.length <= buffer_length )
+        return 11 + header.length;
+    
+    return 0;
 }

@@ -40,7 +40,7 @@ uint8_t * packet_read_u16( uint8_t * buffer, uint16_t * data )
 
 uint8_t * packet_read_u32( uint8_t * buffer, uint32_t * data )
 {
-    *data = (*(buffer+3) << 24) | (*(buffer+2) << 16) | (*(buffer+1) << 8) | *(buffer);
+    *data = (*(buffer) << 24) | (*(buffer+1) << 16) | (*(buffer+2) << 8) | *(buffer+3);
     return buffer+4;
 }
 
@@ -67,4 +67,12 @@ uint8_t * packet_read_u16_buffer( uint8_t * buffer, uint16_t * data, size_t leng
     while( ptr < data + length )
         buffer = packet_read_u16( buffer, ptr++ );
     return buffer;
+}
+
+uint8_t * packet_shift( uint8_t * buffer, size_t buffer_size, uint8_t * out, size_t length ) {
+    if( out != NULL )
+        memcpy( out, buffer, length ); // Optionally copy to 'out'
+    memmove( buffer, buffer+length, buffer_size-length ); // 'Shift' the buffer over
+
+    return buffer+(buffer_size-length);
 }

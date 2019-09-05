@@ -116,3 +116,15 @@ uint8_t * packet_read_u8_buffer( uint8_t * buffer, uint8_t * data, size_t length
  * @return The new buffer position
  */
 uint8_t * packet_read_u16_buffer( uint8_t * buffer, uint16_t * data, size_t length );
+
+/**
+ * Shifts the buffer by 'length' bytes, modifying the origonal buffer.
+ * 
+ * @param buffer The buffer to modify
+ * @param buffer_size The total buffer length
+ * @param out Optionally output the shifted bytes to this pointer, may be NULL
+ * @param length The number of bytes to shift
+ * 
+ * @return The new <strong>end</strong> of the buffer
+ */
+uint8_t * packet_shift( uint8_t * buffer, size_t buffer_size, uint8_t * out, size_t length );

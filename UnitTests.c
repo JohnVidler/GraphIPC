@@ -15,18 +15,54 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-#include <stdlib.h>
-#include <stdio.h>
-#include <stdbool.h>
-#include <memory.h>
-#include <time.h>
 #include "lib/Assert.h"
-#include "lib/RingBuffer.h"
-#include "lib/GraphNetwork.h"
-#include "lib/utility.h"
 #include "lib/avl.h"
+#include "lib/GraphNetwork.h"
+#include "lib/packet.h"
+#include "lib/RingBuffer.h"
+#include "lib/utility.h"
 #include "Log.h"
 #include <arpa/inet.h>
+#include <memory.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+void test_linear_buffer() {
+    uint8_t staticBuffer[64] = { 0 };
+    uint8_t * ptr = staticBuffer;
+
+    printf( "Writing to buffer...\n" );
+    for( uint8_t i=0; i<32; i++ )
+        ptr = packet_write_u8( ptr, i % 25 );
+    
+    printf( "Reading back from buffer...\n" );
+    uint8_t out = 0;
+    ptr = staticBuffer;
+    for( uint8_t i=0; i<32; i++ ) {
+        ptr = packet_read_u8( ptr, &out );
+        assertEqual( out, i % 25 );
+    }
+
+
+    printf( "Resetting buffer...\n" );
+    ptr = staticBuffer;
+    for( uint8_t i=0; i<32; i++ )
+        ptr = packet_write_u8( ptr, i % 25 );
+    
+    printf( "Reading back via shift...\n" );
+    for( uint8_t i=0; i<32; i++ ) {
+        for( int j=0; j<32; j++ )
+            printf( "%2x ", *(staticBuffer+j) );
+        printf( "\n" );
+
+        uint8_t * end = packet_shift( staticBuffer, 64, &out, 1 );
+        assertEqual( out, i % 25 );
+    }
+
+    return;
+}
 
 void test_ring_buffer() {
     RingBuffer_t * buffer = ringbuffer_init( 128 );
@@ -59,6 +95,7 @@ void test_ring_buffer() {
 
     for( int i=0; i<strlen(longInputTestString); i++ ) {
         char tmp = 0;
+        assertEqual( ringbuffer_peek( buffer, 0 ), longInputTestString[i] );
         assert( ringbuffer_read( buffer, &tmp, 1 ) == 1, "Could not pull 1 byte from the ring buffer" );
         assertEqual( tmp, longInputTestString[i] );
     }
@@ -70,38 +107,70 @@ void test_ring_buffer() {
     return;
 }
 
+void dump_buffer( uint8_t * buffer, size_t length ) {
+    for( size_t i=0; i<length; i++ )
+        printf( "%02x", buffer[i] );
+    printf( "\n" );
+}
+
 void test_network_sync() {
-    RingBuffer_t * rx_buffer = ringbuffer_init( 512 );
+    uint8_t rx_buffer[512] = { 0 };
+    uint8_t * rx_buffer_tail = rx_buffer;
 
-    unsigned int next = 0;
-    gnw_state_t context = { .state=0 };
+    uint32_t next = 0;
+    uint32_t expect = 0;
 
-    for( int i=0; i<2000; i++ ) {
-        unsigned char packet[sizeof(gnw_header_t) + 10] = {0};
-        do {
-            gnw_header_t *packer_header = (gnw_header_t *) packet;
-            packer_header->magic = GNW_MAGIC;
-            packer_header->length = 10;
-            packer_header->type = next;
-            packer_header->version = GNW_VERSION;
-            *(char *) (packet + sizeof(gnw_header_t)) = (unsigned char) (next++);
+    for( int i=0; i<10; i++ ) {
+        for( int b=0; b<3; b++ ) {
+            rx_buffer_tail = packet_write_u8( rx_buffer_tail, GNW_MAGIC );
+            rx_buffer_tail = packet_write_u8( rx_buffer_tail, GNW_VERSION );
+            rx_buffer_tail = packet_write_u8( rx_buffer_tail, 0xBB );
+            rx_buffer_tail = packet_write_u32( rx_buffer_tail, next++ );
+            rx_buffer_tail = packet_write_u32( rx_buffer_tail, 0 );
+        }
+        dump_buffer( rx_buffer, rx_buffer_tail - rx_buffer );
 
-        } while( ringbuffer_write(rx_buffer, packet, sizeof(gnw_header_t) + 10) == sizeof(gnw_header_t) + 10 );
+        ssize_t readyBytes = 0;
+        while( (readyBytes = gnw_nextPacket( rx_buffer, rx_buffer_tail - rx_buffer )) != 0 ) {
+            printf( "Bytes = %ld\n", readyBytes );
 
-        unsigned char inPacket[sizeof(gnw_header_t) + 30] = { 0 };
+            // Are we in some invalid buffer state?
+            if( readyBytes < 0 ) {
+                log_warn( "Network desync, attempting to resync... (Err = %d)", readyBytes );
+                // Dump a byte, try to clear the buffer and re-try.
+                packet_shift( rx_buffer, 512, NULL, 1 );
+                rx_buffer_tail--;
+                dump_buffer( rx_buffer, rx_buffer_tail - rx_buffer );
+                continue;
+            }
 
-        // Try and read a packet!
-        while( gnw_nextPacket( rx_buffer, &context, &inPacket ) ) {
-            gnw_header_t * hdr = (gnw_header_t *)inPacket;
-            assert( hdr->magic == GNW_MAGIC, "Bad packet magic" );
-            assert( hdr->version == GNW_VERSION, "Bad packet version" );
-            assert( hdr->length == 10, "Bad packet length" );
-            assert( hdr->type == *(inPacket + sizeof(gnw_header_t)), "Type/Content mismatch" );
+            gnw_header_t header = { 0 };
+            
+            uint8_t * ptr = rx_buffer;
+            ptr = packet_read_u8( ptr, &header.magic );
+            ptr = packet_read_u8( ptr, &header.version );
+            ptr = packet_read_u8( ptr, &header.type );
+            ptr = packet_read_u32( ptr, &header.source );
+            ptr = packet_read_u32( ptr, &header.length );
+
+            assertEqual( header.magic, GNW_MAGIC );
+            assertEqual( header.version, GNW_VERSION );
+            assertEqual( header.type, 0xBB );
+            assertEqual( header.length, 0 );
+
+            assertEqual( expect, header.source );
+            //printf( "Addr: %ld\n", header.source );
+            
+            expect++;
+            packet_shift( rx_buffer, 512, NULL, readyBytes );
+            rx_buffer_tail -= readyBytes;
+
+            printf( "Packet OK\n" );
+            dump_buffer( rx_buffer, rx_buffer_tail - rx_buffer );
         }
 
+        
     }
-
-    ringbuffer_destroy( rx_buffer );
 }
 
 void test_utility_functions() {
@@ -171,7 +240,7 @@ void test_btree() {
 }
 
 int main(int argc, char ** argv ) {
-    setReportAssert( true );
+    setReportAssert( false );
     setExitOnAssert( true );
 
     log_setLevel( WARNING );
@@ -182,12 +251,14 @@ int main(int argc, char ** argv ) {
     log_write( 3, "Log level 3" );
     log_write( 4, "Log level 4" );
 
-    test_ring_buffer();
-    test_btree();
+    test_linear_buffer();
+
+    //test_ring_buffer();
+    //test_btree();
 
     test_network_sync();
 
-    test_utility_functions();
+    //test_utility_functions();
 
     return EXIT_SUCCESS;
 }

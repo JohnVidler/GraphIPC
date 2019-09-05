@@ -77,10 +77,6 @@ typedef struct {
     uint64_t commandPackets;
 } gnw_stats_t;
 
-typedef struct {
-    int state;
-} gnw_state_t;
-
 /** GNW Packet header structure */
 typedef struct {
     uint8_t       magic;
@@ -103,4 +99,4 @@ void gnw_sendCommand( int fd, uint8_t command );
 
 void gnw_request_connect( int fd, gnw_address_t _source, gnw_address_t _target );
 
-bool gnw_nextPacket( RingBuffer_t * buffer, gnw_state_t * context, void * packetBuffer );
+ssize_t gnw_nextPacket( uint8_t * buffer, size_t buffer_size );

@@ -28,6 +28,7 @@
 #include "lib/Assert.h"
 #include "common.h"
 #include "lib/LinkedList.h"
+#include "lib/packet.h"
 #include "IndexTable.h"
 #include "NodeTable.h"
 #include "ForwardTable.h"
@@ -238,10 +239,7 @@ void * clientProcess( void * _context ) {
     context->state = GNW_STATE_OPEN;
 
     // Fire up our ring buffer
-    context->rx_buffer = ringbuffer_init( config.network_mtu * 100 ); // 20 packets of MTU-size
-
-    // Probably should be part of the thread context structure, but here for now...
-    gnw_state_t parser_context = { .state = 0 };
+    context->rx_buffer = ringbuffer_init( config.network_mtu * 20 ); // 20 packets of MTU-size
 
     log_info( "Client poll loop running..." );
 
@@ -259,6 +257,7 @@ void * clientProcess( void * _context ) {
     int logout_timeout = 10;
     ssize_t bytes = 1;
     while( bytes > 0 ) {
+        log_debug( "Poll..." );
         int rv = poll( watch_fd, 1, tick_rate );
 
         // Wait error, drop back to callee
@@ -270,6 +269,7 @@ void * clientProcess( void * _context ) {
 
         // Timeout...
         if( rv == 0 ) {
+            log_debug( "Timeout" );
             if( context->state == GNW_STATE_OPEN ) {
                 if (logout_timeout-- < 0) {
                     log_warn( "Client timed out, dropping them.\n" );
@@ -284,10 +284,14 @@ void * clientProcess( void * _context ) {
         }
         logout_timeout = 10; // Timeout reset, we have data.
 
+        log_debug( "Data on the wire..." );
+
         // Only read if we're not backing off, otherwise we'll trash the buffer
         if( read_back_off == false ) {
             memset( latchBuffer, 0, config.network_mtu ); // Here purely for sanity, remove for speeeeeed
             bytes = read(context->socket_fd, latchBuffer, config.network_mtu);
+
+            log_debug( "Read %ld bytes from the client", bytes );
 
             if( config.verbosity > 3 ) {
                 printf("[ ");
@@ -314,17 +318,25 @@ void * clientProcess( void * _context ) {
             context->packets_in++;
         }
 
+        log_debug( "Parsing..." );
         while( gnw_nextPacket( context->rx_buffer, &parser_context, iBuffer ) ) {
-            gnw_header_t *  packet_header  = (gnw_header_t *)iBuffer;
-            //uint32_t        packet_length  = sizeof( gnw_header_t ) + packet_header->length;
-            unsigned char * packet_payload = (unsigned char *)( iBuffer + sizeof(gnw_header_t) );
+            printf( "{PKT}\n" );
+            gnw_header_t packet_header  = { 0 };
+            uint8_t * ptr = iBuffer;
+            ptr = packet_read_u8( ptr, &packet_header.magic );
+            ptr = packet_read_u8( ptr, &packet_header.magic );
+            ptr = packet_read_u8( ptr, &packet_header.type );
+            ptr = packet_read_u32( ptr, &packet_header.source );
+            ptr = packet_read_u32( ptr, &packet_header.length );
 
-            log_debug( "RX: Type = %x, Length = %u", packet_header->type, packet_header->length );
+            unsigned char * packet_payload = (unsigned char *)ptr;
 
-            switch( packet_header->type ) {
+            log_debug( "RX: Type = %x, Length = %u", packet_header.type, packet_header.length );
+
+            switch( packet_header.type ) {
                 case GNW_DATA: {
                     // Check out any edges for this source...
-                    forward_t *forward = forward_table_find(packet_header->source);
+                    forward_t *forward = forward_table_find(packet_header.source);
 
                     // Fast exit, if there are no links associated with this node
                     if (forward == NULL || forward->edgeList == NULL)
@@ -347,17 +359,17 @@ void * clientProcess( void * _context ) {
                                 if (remote == NULL) {
                                     log_write(SEVERE,
                                               "Somehow, target [%08x] managed to get into [%08x]'s forward list! Something is very wrong!",
-                                              iter->target, packet_header->source);
+                                              iter->target, packet_header.source);
                                     log_write(SEVERE, "Giving up on this broadcast, to save the rest of the graph!");
                                     pthread_mutex_unlock(&forward->listLock);
                                     break;
                                 }
 
-                                gnw_emitDataPacket(remote->socket_fd, packet_header->source, packet_payload,
-                                                   packet_header->length);
-                                context->bytes_out += packet_header->length;
+                                gnw_emitDataPacket(remote->socket_fd, packet_header.source, packet_payload,
+                                                   packet_header.length);
+                                context->bytes_out += packet_header.length;
                                 context->packets_out++;
-                                remote->bytes_in += packet_header->length;
+                                remote->bytes_in += packet_header.length;
                                 remote->packets_in++;
 
                                 iter = iter->next;
@@ -387,11 +399,11 @@ void * clientProcess( void * _context ) {
 
                             // Guard against
                             if (remote != NULL) {
-                                gnw_emitDataPacket(remote->socket_fd, packet_header->source, packet_payload,
-                                                   packet_header->length);
-                                context->bytes_out += packet_header->length;
+                                gnw_emitDataPacket(remote->socket_fd, packet_header.source, packet_payload,
+                                                   packet_header.length);
+                                context->bytes_out += packet_header.length;
                                 context->packets_out++;
-                                remote->bytes_in += packet_header->length;
+                                remote->bytes_in += packet_header.length;
                                 remote->packets_in++;
                             }
 
@@ -419,11 +431,11 @@ void * clientProcess( void * _context ) {
                                          forward->round_robin_ref->target);
                             }
 
-                            gnw_emitDataPacket(remote->socket_fd, packet_header->source, packet_payload,
-                                               packet_header->length);
-                            context->bytes_out += packet_header->length;
+                            gnw_emitDataPacket(remote->socket_fd, packet_header.source, packet_payload,
+                                               packet_header.length);
+                            context->bytes_out += packet_header.length;
                             context->packets_out++;
-                            remote->bytes_in += packet_header->length;
+                            remote->bytes_in += packet_header.length;
                             remote->packets_in++;
 
                             forward->round_robin_ref = forward->round_robin_ref->next;
@@ -435,7 +447,7 @@ void * clientProcess( void * _context ) {
                 }
 
                 case GNW_COMMAND:
-                    if( packet_header->length < 1 ) {
+                    if( packet_header.length < 1 ) {
                         log_warn( "Client sent a command with no operator, skipping." );
                         break;
                     }
@@ -447,7 +459,7 @@ void * clientProcess( void * _context ) {
 
                             gnw_address_t fresh_address = genNextValidAddress();
 
-                            if( packet_header->length != 1 ) {
+                            if( packet_header.length != 1 ) {
                                 gnw_address_t * reqAddress = (gnw_address_t *)(packet_payload+1);
                                 gnw_address_t nodeMask = (~(unsigned)0) ^ (unsigned)0xFF;
 

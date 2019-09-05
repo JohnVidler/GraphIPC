@@ -15,23 +15,24 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include "BuildInfo.h"
+#include "common.h"
+#include "lib/GraphNetwork.h"
+#include "lib/LinkedList.h"
+#include "lib/packet.h"
+#include "Log.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <getopt.h>
+#include <inttypes.h>
+#include <poll.h>
+#include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <inttypes.h>
-#include <unistd.h>
-#include <errno.h>
 #include <string.h>
-#include <stdbool.h>
-#include <poll.h>
-#include <getopt.h>
-#include <pthread.h>
+#include <unistd.h>
 #include <wait.h>
-#include <fcntl.h>
-#include "lib/GraphNetwork.h"
-#include "common.h"
-#include "lib/LinkedList.h"
-#include "Log.h"
-#include "BuildInfo.h"
 
 #define LOG_NAME "GraphWrap"
 
@@ -55,8 +56,8 @@ extern char **environ;
 struct _configuration {
     int            network_mtu;     // default = 1500
     unsigned int   read_timeout;    // default = 5
-    RingBuffer_t * rx_buffer;
-    gnw_state_t *  parser_context;
+    uint8_t     *  rx_buffer;
+    uint8_t     *  rx_buffer_tail;
 
     unsigned char  arg_mux_policy;
     unsigned char  arg_demux_policy;
@@ -67,6 +68,7 @@ struct _configuration {
     bool           arg_immediate;
     unsigned int   arg_verbosity;
     bool           arg_echo;
+    char           arg_delimiter;
 };
 struct _configuration config;
 
@@ -109,8 +111,8 @@ int getRouterFD() {
         router_fd = socket_connect(config.arg_host, config.arg_port);
 
         // Build the other network-related structures
-        config.parser_context = malloc( sizeof(gnw_state_t) );
-        config.rx_buffer = ringbuffer_init( config.network_mtu * 20 ); // 20 packet(ish) buffer
+        config.rx_buffer = (uint8_t *)malloc( config.network_mtu * 20 ); // 20 packet(ish) buffer
+        config.rx_buffer_tail = config.rx_buffer;
     }
     return router_fd;
 }
@@ -140,22 +142,40 @@ gnw_address_t getNodeAddress( gnw_address_t try_address ) {
             log_error( "IO Error, halting! (1)" );
             exit( EXIT_FAILURE ); // Hard exit here, as return fails to... well, fail. -John
         }
-        if( ringbuffer_write( config.rx_buffer, iBuffer, bytesRead ) != bytesRead )
-            log_warn( "Buffer overflow! Data loss occurred!" );
 
-        while( gnw_nextPacket( config.rx_buffer, config.parser_context, iBuffer ) ) {
-            gnw_header_t * header = (gnw_header_t *)iBuffer; // FIXFIXFIX - this is a terrible way of dealing with this! Should use a packet serializer!
-            unsigned char * payload = iBuffer + sizeof(gnw_header_t);
+        config.rx_buffer_tail = packet_write_u8_buffer( config.rx_buffer_tail, iBuffer, bytesRead );
+
+        ssize_t readyBytes = 0;
+        while( (readyBytes = gnw_nextPacket( config.rx_buffer, config.rx_buffer_tail - config.rx_buffer )) != 0 ) {
+
+            // Are we in some invalid buffer state?
+            if( readyBytes < 0 ) {
+                log_warn( "Network desync, attempting to resync... (Err = %d)", readyBytes );
+                // Dump a byte, try to clear the buffer and re-try.
+                packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, 1 );
+                config.rx_buffer_tail--;
+                continue;
+            }
+
+            gnw_header_t header = { 0 };
+            
+            uint8_t * ptr = config.rx_buffer;
+            ptr = packet_read_u8( ptr, &header.magic );
+            ptr = packet_read_u8( ptr, &header.version );
+            ptr = packet_read_u32( ptr, &header.source );
+            ptr = packet_read_u32( ptr, &header.length );
+
+            unsigned char * payload = ptr;
 
             // Uncomment for debug output
-            //gnw_dumpPacket( stdout, iBuffer, -1 );
+            gnw_dumpPacket( stdout, iBuffer, -1 );
 
-            if( header->version != GNW_VERSION )
+            if( header.version != GNW_VERSION )
                 log_warn( "Warning! Router/Client version mismatch!" );
 
-            switch( header->type ) {
+            switch( header.type ) {
                 case GNW_COMMAND | GNW_REPLY: // Command response
-                    if( header->length < 1 ) {
+                    if( header.length < 1 ) {
                         log_warn( "Router sent a command with no operator, no idea what to do! Trying to skip past it..." );
                         break;
                     }
@@ -178,12 +198,12 @@ gnw_address_t getNodeAddress( gnw_address_t try_address ) {
                     break;
 
                 case GNW_DATA:
-                    if( header->length == 0 )
+                    if( header.length == 0 )
                         log_warn("Router keepalive received (lossy connection?)");
                     break;
 
                 default:
-                    log_warn( "Unknown response from router, skipping. (%x)", header->type );
+                    log_warn( "Unknown response from router, skipping. (%x)", header.type );
             }
         }
     }
@@ -196,9 +216,8 @@ gnw_address_t getNodeAddress( gnw_address_t try_address ) {
 int dropRouterFD() {
     if( router_fd != -1 ) {
         log_info( "Disconnecting from router..." );
-        ringbuffer_destroy(config.rx_buffer);
-        free(config.parser_context);
-        close(router_fd);
+        free( config.rx_buffer );
+        close( router_fd );
     }
     return -1;
 }
@@ -253,6 +272,11 @@ int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** ar
 void * sink_thread( void * _context ) {
     sink_context_t * context = (sink_context_t *)_context;
 
+    // 2x MTU, so we always have room for one entire transmission
+    uint8_t outputBuffer[ config.network_mtu * 2 ];
+    memset( outputBuffer, 0, config.network_mtu * 2 );
+    uint8_t * outputTail = outputBuffer;
+
     log_debug( "Sink started!" );
 
     // Become two actual processes, launch the child.
@@ -295,14 +319,26 @@ void * sink_thread( void * _context ) {
             // Handle any events on the process output
             if( watch_fd[0].revents != 0 ) {
                 if ((watch_fd[0].revents & POLLIN) == POLLIN) {
-                    unsigned char buffer[config.network_mtu];
+                    uint8_t buffer[config.network_mtu];
 
-                    ssize_t bytesRead = read(watch_fd[0].fd, &buffer, config.network_mtu);
+                    ssize_t bytesRead = read(watch_fd[0].fd, buffer, config.network_mtu);
 
                     if( config.arg_verbosity > 0 )
                         fprintf( stderr, ">>>\t%s\n", buffer );
 
-                    gnw_emitDataPacket( rfd, context->stream_address, buffer, bytesRead ); // Always emit from the node source address, not the stream source address
+                    if( bytesRead > 0 ) {
+                        // Do we have a delim at any point in this new block?
+                        for( size_t offset=0; offset<bytesRead; offset++ ) {
+                            outputTail = packet_write_u8( outputTail, buffer[offset] );
+
+                            if( buffer[offset] == config.arg_delimiter ) {
+                                uint8_t txBuffer[ outputTail-outputBuffer ];
+                                size_t txLength = outputTail-outputBuffer;
+                                outputTail = packet_shift( outputBuffer, config.network_mtu * 2, txBuffer, txLength );
+                                gnw_emitDataPacket( rfd, context->stream_address, txBuffer, txLength ); // Always emit from the node source address, not the stream source address
+                            }
+                        }
+                    }
                 }
             }
 
@@ -442,6 +478,7 @@ typedef struct {
 #define ARG_DEMUX      8
 #define ARG_IMMEDIATE  9
 #define ARG_VERSION    10
+#define ARG_DELIMITER  11
 
 int main(int argc, char ** argv ) {
     // Initial states
@@ -465,6 +502,8 @@ int main(int argc, char ** argv ) {
 
     config.arg_echo = false;
 
+    config.arg_delimiter = '\0';
+
     // Check the system MTU and match it - this assumes local operation, for now.
     // Note: Possibly add an override for this in the flags...
     config.network_mtu = getIFaceMTU("lo");
@@ -479,7 +518,7 @@ int main(int argc, char ** argv ) {
     // apparently, this is a compiler bug! (gcc v7.3.1)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-braces"
-    struct option longOptions[12] = {
+    struct option longOptions[] = {
             [ARG_HELP]       = { .name="help",      .has_arg=no_argument,       .flag=NULL },
             [ARG_USAGE]      = { .name="usage",     .has_arg=no_argument,       .flag=NULL },
             [ARG_HOST]       = { .name="host",      .has_arg=required_argument, .flag=NULL },
@@ -491,6 +530,7 @@ int main(int argc, char ** argv ) {
             [ARG_DEMUX]      = { .name="output",    .has_arg=no_argument,       .flag=NULL },
             [ARG_IMMEDIATE]  = { .name="immediate", .has_arg=no_argument,       .flag=NULL },
             [ARG_VERSION]    = { .name="version",   .has_arg=no_argument,       .flag=NULL },
+            [ARG_DELIMITER]  = { .name="delim",     .has_arg=required_argument, .flag=NULL },
             0
     };
     // Purely so descriptions and arguments are managed together in the same block - this could be done purely in the --help/--usage
@@ -504,7 +544,8 @@ int main(int argc, char ** argv ) {
         [ARG_INPUT]     = { .arg="i",  .description="Run in input bridge mode; take and input on stdin and forward to the GraphRouter." },
         [ARG_OUTPUT]    = { .arg="o",  .description="Rung in output bridge mode; take any messages from the GraphRouter and emit them on stdout." },
         [ARG_IMMEDIATE] = { .arg=NULL, .description="Start running the inner binary immediately. By default wrapped processes are only started on demand when data arrives." },
-        [ARG_VERSION]   = { .arg=NULL, .description="" },
+        [ARG_VERSION]   = { .arg=NULL, .description="Report which version this program is, then exit." },
+        [ARG_DELIMITER] = { .arg="d",  .description="Configure the packet delimiter, if unspecified, will default to the string null terminator '\0'." },
         0
     };
 #pragma GCC diagnostic pop
@@ -512,7 +553,7 @@ int main(int argc, char ** argv ) {
     // Argument Parsing //
     int arg;
     int indexPtr = 0;
-    while ((arg = getopt_long(argc, argv, "h:a:iov", longOptions, &indexPtr)) != -1) {
+    while ((arg = getopt_long(argc, argv, "h:a:p:iovd", longOptions, &indexPtr)) != -1) {
 
         // If we have a short arg, pass it over to the long arg index.
         // Note: This will work assuming we have less than 65(?) long arguments... I think -John.
@@ -587,6 +628,26 @@ int main(int argc, char ** argv ) {
             case ARG_VERSION:
                 printf( "Version: #%s\n", GIT_HASH );
                 return EXIT_SUCCESS;
+            
+            case ARG_DELIMITER:
+            case 'd':
+                /*if( optarg[0] == '\\') {
+                    switch( optarg[1] ) {
+                        case '\\': config.arg_delimiter = '\\'; break;
+                        case '0':  config.arg_delimiter = '\0'; break;
+                        case 'r':  config.arg_delimiter = '\r'; break;
+                        case 'n':  config.arg_delimiter = '\n'; break;
+                        case 't':  config.arg_delimiter = '\t'; break;
+
+                        default:
+                            log_warn( "Unrecognised escape character '%c', using it directly instead.", optarg[1] );
+                            config.arg_delimiter = optarg[1];
+                    }
+                }
+                else
+                    config.arg_delimiter = optarg[0];*/
+                printf( "Delimiter = '%s'\n", optarg );
+                break;
 
             case 'v':
                 config.arg_verbosity++;
@@ -613,8 +674,6 @@ int main(int argc, char ** argv ) {
     config.arg_address = assigned_address;
 
     log_debug( "Beginning poll of all known FDs..." );
-    gnw_state_t gnw_state;
-    memset( &gnw_state, 0, sizeof(gnw_state) );
 
     int status = 0;
     while( status == 0 ) {
@@ -644,16 +703,35 @@ int main(int argc, char ** argv ) {
                         if( stream_fd[index].fd == rfd ) {
                             printf("Read %ldB from Router\n", readBytes);
 
-                            if( ringbuffer_write( config.rx_buffer, iBuffer, readBytes ) != readBytes )
-                                log_warn( "Receive buffer overflow! Data has been lost!" );
+                            config.rx_buffer_tail = packet_write_u8_buffer( config.rx_buffer_tail, iBuffer, readBytes );
 
-                            unsigned char packet_buffer[config.network_mtu + 1];
+                            uint8_t packet_buffer[config.network_mtu + 1];
                             memset( packet_buffer, 0, config.network_mtu + 1 );
-                            if( gnw_nextPacket( config.rx_buffer, &gnw_state, packet_buffer ) ) {
-                                gnw_header_t * header = (gnw_header_t *) packet_buffer;
-                                unsigned char * payload = packet_buffer + sizeof( gnw_header_t );
+                            ssize_t readyBytes = 0;
+                            if( (readyBytes = gnw_nextPacket( config.rx_buffer, config.rx_buffer_tail - config.rx_buffer )) != 0 ) {
 
-                                handlePacket( index, header, payload );
+                                if( readyBytes < 0 ) {
+                                    log_warn( "Network desync, attempting to resync... (Err = %d)", readyBytes );
+                                    // Dump a byte, try to clear the buffer and re-try.
+                                    packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, 1 );
+                                    config.rx_buffer_tail--;
+                                    continue;
+                                }
+
+                                gnw_header_t header = { 0 };
+
+                                uint8_t * ptr = config.rx_buffer;
+                                ptr = packet_read_u8( ptr, &header.magic );
+                                ptr = packet_read_u8( ptr, &header.version );
+                                ptr = packet_read_u8( ptr, &header.type );
+                                ptr = packet_read_u32( ptr, &header.source );
+                                ptr = packet_read_u32( ptr, &header.length );
+
+                                handlePacket( index, &header, ptr );
+
+                                // Shift the buffer and sync up the tail pointer
+                                packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, readyBytes );
+                                config.rx_buffer_tail =- readyBytes;
                             }
 
                         }

@@ -23,6 +23,7 @@
 #include "Assert.h"
 #include "RingBuffer.h"
 
+__attribute__((deprecated))
 void ringbuffer_print( RingBuffer_t * root ) {
     //printf( "Ring State\n" );
     /*printf( "\tStart:\t%llu\n", root->start );
@@ -60,12 +61,14 @@ void ringbuffer_print( RingBuffer_t * root ) {
     fflush( stdout );
 }
 
+__attribute__((deprecated))
 ssize_t minValue( size_t a, size_t b ) {
     if( a < b )
         return a;
     return b;
 }
 
+__attribute__((deprecated))
 RingBuffer_t * ringbuffer_init(size_t size)
 {
     RingBuffer_t * root = (RingBuffer_t *)malloc( sizeof(RingBuffer_t) + size );
@@ -82,6 +85,7 @@ RingBuffer_t * ringbuffer_init(size_t size)
     return root;
 }
 
+__attribute__((deprecated))
 bool ringbuffer_destroy( RingBuffer_t * root )
 {
     sem_wait( &(root->lock) );
@@ -90,10 +94,12 @@ bool ringbuffer_destroy( RingBuffer_t * root )
     return true;
 }
 
+__attribute__((deprecated))
 size_t ringbuffer_capacity(RingBuffer_t *root) {
     return root->capacity - ringbuffer_length( root ) - 1;
 }
 
+__attribute__((deprecated))
 size_t ringbuffer_length( RingBuffer_t *root ) {
     if( root->head == root->tail )
         return 0;
@@ -103,6 +109,7 @@ size_t ringbuffer_length( RingBuffer_t *root ) {
     return (root->end - root->tail) + (root->head - root->start);
 }
 
+__attribute__((deprecated))
 ssize_t ringbuffer_peek_copy( RingBuffer_t * root, void * buffer, size_t maxLength ) {
     sem_wait( &(root->lock) );
 
@@ -133,6 +140,7 @@ ssize_t ringbuffer_peek_copy( RingBuffer_t * root, void * buffer, size_t maxLeng
     return readLength;
 }
 
+__attribute__((deprecated))
 ssize_t ringbuffer_read( RingBuffer_t * root, void * buffer, size_t maxLength )
 {
     sem_wait( &(root->lock) );
@@ -172,6 +180,7 @@ ssize_t ringbuffer_read( RingBuffer_t * root, void * buffer, size_t maxLength )
     return readLength;
 }
 
+__attribute__((deprecated))
 uint8_t ringbuffer_peek( RingBuffer_t * root, size_t offset ) {
     sem_wait( &(root->lock) );
 
@@ -191,6 +200,7 @@ uint8_t ringbuffer_peek( RingBuffer_t * root, size_t offset ) {
  * @param offset The offset, in bytes
  * @return The value at this offset
  */
+__attribute__((deprecated))
 uint16_t ringbuffer_peek16( RingBuffer_t * root, size_t offset ) {
     sem_wait( &(root->lock) );
 
@@ -210,18 +220,26 @@ uint16_t ringbuffer_peek16( RingBuffer_t * root, size_t offset ) {
  * @param offset The offset, in bytes
  * @return The value at this offset
  */
+__attribute__((deprecated))
 uint32_t ringbuffer_peek32( RingBuffer_t * root, size_t offset ) {
-    sem_wait( &(root->lock) );
+    /*sem_wait( &(root->lock) );
 
     void * ref = root->tail + (offset % root->capacity);
     if( ref > root->end )
         ref = root->start + ( root->tail + (offset % root->capacity) - root->end );
 
     uint32_t tmp = *(uint32_t *)(ref);
-    sem_post( &(root->lock) );
+    sem_post( &(root->lock) );*/
+
+    uint32_t tmp = (ringbuffer_peek( root, offset+3 ) << 24) | 
+                    (ringbuffer_peek( root, offset+2 ) << 16) |
+                    (ringbuffer_peek( root, offset+1 ) << 8) |
+                    ringbuffer_peek( root, offset+3 );
+
     return tmp;
 }
 
+__attribute__((deprecated))
 ssize_t ringbuffer_write( RingBuffer_t * root, void * buffer, size_t length ) {
     sem_wait( &(root->lock) );
 
