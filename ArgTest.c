@@ -18,30 +18,55 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <getopt.h>
 #include <stdio.h>
-#include <zconf.h>
 #include <time.h>
+#include <unistd.h>
+#include <zconf.h>
+#include <stdlib.h>
+#include <stdbool.h>
 
-/**
- * A semi-pointless program to just emit the arguments the program is provided with
- * to test the wrapping functions.
- */
+bool _waitFor = false;
+unsigned long _interval = 1000000;
+unsigned long _messages = 10;
+
 int main(int argc, char ** argv ) {
-    printf( "%d arguments\n", argc );
-    for( int i=0; i<argc; i++ )
-        printf( "  [%d] %s\n", i, argv[i] );
+
+    int c;
+    while( (c = getopt( argc, argv, "wi:c:" )) != -1 ) {
+        switch( c ) {
+            case 'i':
+                _interval = strtoul( optarg, NULL, 10 );
+                break;
+            
+            case 'c':
+                _messages = strtoul( optarg, NULL, 10 );
+                break;
+            
+            case 'w':
+                _waitFor = true;
+                break;
+
+            default:
+                fprintf( stderr, "Bad arguments, STOP.\n" );
+                exit( 1 );
+        }
+    }
 
     time_t rawTime;
     struct tm * timeInfo;
 
-    int timeout = 10;
-    while( timeout-- > 0 ) {
+    unsigned long cycles = 0;
+    while( cycles++ < _messages ) {
+        if( _waitFor )
+            gets( stdin );
+
         time(&rawTime);
         timeInfo = localtime(&rawTime);
 
-        printf("%s", asctime(timeInfo));
+        printf( "%lu:\t%s", cycles, asctime(timeInfo) );
         fflush( stdout );
-        sleep( 1 );
+        usleep( _interval );
     }
 
     return 0;
