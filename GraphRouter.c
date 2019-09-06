@@ -57,7 +57,8 @@ volatile struct _configuration config;
 typedef struct {
     pthread_t * thread_state;
     int socket_fd;
-    RingBuffer_t * rx_buffer;
+    uint8_t * rx_buffer;
+    uint8_t * rx_buffer_tail;
     int state;
     uint64_t packets_in;
     uint64_t packets_out;
@@ -80,6 +81,9 @@ gnw_address_t genNextValidAddress() {
         log_write(SEVERE, "Address pool exhaustion! No more addresses!");
         exit( EXIT_FAILURE ); // Note: this is a really, really bad way to handle this, but it'll save us from bad internal state mangling the output, kinda :|
     }
+
+    log_debug( "Next addresss = %08x\n", nextNodeAddress );
+
     return nextNodeAddress;
 }
 
@@ -226,7 +230,8 @@ void emitStatistics( FILE * stream ) {
 void context_cleanup( context_t * context ) {
     context->state = GNW_STATE_CLOSE;
     close( context->socket_fd );
-    ringbuffer_destroy( context->rx_buffer );
+    context->rx_buffer_tail = NULL;
+    free( context->rx_buffer );
 
     // Become zombie, in case cleanup fails
     context->state = GNW_STATE_ZOMBIE;
@@ -239,7 +244,8 @@ void * clientProcess( void * _context ) {
     context->state = GNW_STATE_OPEN;
 
     // Fire up our ring buffer
-    context->rx_buffer = ringbuffer_init( config.network_mtu * 20 ); // 20 packets of MTU-size
+    context->rx_buffer = (uint8_t *)malloc( config.network_mtu * 20 ); // 20 packets of MTU-size
+    context->rx_buffer_tail = context->rx_buffer;
 
     log_info( "Client poll loop running..." );
 
@@ -250,9 +256,7 @@ void * clientProcess( void * _context ) {
     watch_fd[0].events = POLLIN;
 
     unsigned char latchBuffer[config.network_mtu];
-    unsigned char iBuffer[config.network_mtu];
 
-    bool read_back_off = false;
     int tick_rate = 1000;
     int logout_timeout = 10;
     ssize_t bytes = 1;
@@ -286,50 +290,38 @@ void * clientProcess( void * _context ) {
 
         log_debug( "Data on the wire..." );
 
-        // Only read if we're not backing off, otherwise we'll trash the buffer
-        if( read_back_off == false ) {
-            memset( latchBuffer, 0, config.network_mtu ); // Here purely for sanity, remove for speeeeeed
-            bytes = read(context->socket_fd, latchBuffer, config.network_mtu);
+        bytes = read( context->socket_fd, latchBuffer, config.network_mtu );
 
-            log_debug( "Read %ld bytes from the client", bytes );
-
-            if( config.verbosity > 3 ) {
-                printf("[ ");
-                for (int i = 0; i < bytes; i++)
-                    printf("%02x ", latchBuffer[i]);
-                printf("]");
-            }
-        }
-
-        if( bytes == -1 ) {
-            log_warn( "Client connection looks dropped\n" );
-            continue;
-        }
-
-        // Attempt (or re-attempt) to push to the ring, backing off as required.
-        read_back_off = false;
-        if( ringbuffer_write( context->rx_buffer, latchBuffer, bytes ) != bytes ) {
-            log_warn( "Buffer overflow! Read backoff enabled, trying to drain the buffer...\n" );
-            read_back_off = true;
-        }
-        else
-        {
-            context->bytes_in += bytes;
-            context->packets_in++;
-        }
+        context->rx_buffer_tail = packet_write_u8_buffer( context->rx_buffer_tail, latchBuffer, bytes );
+        context->bytes_in += bytes;
+        context->packets_in++;
 
         log_debug( "Parsing..." );
-        while( gnw_nextPacket( context->rx_buffer, &parser_context, iBuffer ) ) {
-            printf( "{PKT}\n" );
+        ssize_t readyBytes = -1;
+        while( (readyBytes = gnw_nextPacket( context->rx_buffer, context->rx_buffer_tail - context->rx_buffer )) != 0 ) {
+
+            if( readyBytes < 0 ) {
+                printf( "DESYNC...\n" );
+                packet_shift( context->rx_buffer, config.network_mtu * 20, NULL, 1 );
+                context->rx_buffer_tail--;
+            }
+
+            printf( "{PKT:%2ld}\n", readyBytes );
+
             gnw_header_t packet_header  = { 0 };
-            uint8_t * ptr = iBuffer;
+            uint8_t * ptr = context->rx_buffer;
             ptr = packet_read_u8( ptr, &packet_header.magic );
-            ptr = packet_read_u8( ptr, &packet_header.magic );
+            ptr = packet_read_u8( ptr, &packet_header.version );
             ptr = packet_read_u8( ptr, &packet_header.type );
             ptr = packet_read_u32( ptr, &packet_header.source );
             ptr = packet_read_u32( ptr, &packet_header.length );
 
-            unsigned char * packet_payload = (unsigned char *)ptr;
+            uint8_t packet_payload[config.network_mtu]; // Static buffer to avoid malloc'ing :)
+            memcpy( packet_payload, ptr, packet_header.length );
+
+            // Shift the buffer along, so we don't have to worry about it later
+            packet_shift( context->rx_buffer, config.network_mtu * 20, NULL, 11 + packet_header.length );
+            context->rx_buffer_tail -= 11 + packet_header.length;
 
             log_debug( "RX: Type = %x, Length = %u", packet_header.type, packet_header.length );
 
@@ -552,7 +544,6 @@ void * clientProcess( void * _context ) {
 
                         default:
                             log_warn( "Unknown command, skipped" );
-                            gnw_dumpPacket( stdout, iBuffer, -1 );
                             break;
                     }
 
@@ -564,7 +555,6 @@ void * clientProcess( void * _context ) {
                     break;
             }
         }
-
 
     }
 

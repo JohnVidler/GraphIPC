@@ -162,19 +162,21 @@ gnw_address_t getNodeAddress( gnw_address_t try_address ) {
             uint8_t * ptr = config.rx_buffer;
             ptr = packet_read_u8( ptr, &header.magic );
             ptr = packet_read_u8( ptr, &header.version );
+            ptr = packet_read_u8( ptr, &header.type );
             ptr = packet_read_u32( ptr, &header.source );
             ptr = packet_read_u32( ptr, &header.length );
 
-            unsigned char * payload = ptr;
+            uint8_t payload[config.network_mtu];
+            memcpy( payload, ptr, header.length );
 
-            // Uncomment for debug output
-            gnw_dumpPacket( stdout, iBuffer, -1 );
+            packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, 11 + header.length );
 
             if( header.version != GNW_VERSION )
                 log_warn( "Warning! Router/Client version mismatch!" );
 
             switch( header.type ) {
                 case GNW_COMMAND | GNW_REPLY: // Command response
+                    printf( "{CMD/RPLY}\n" );
                     if( header.length < 1 ) {
                         log_warn( "Router sent a command with no operator, no idea what to do! Trying to skip past it..." );
                         break;
@@ -182,6 +184,7 @@ gnw_address_t getNodeAddress( gnw_address_t try_address ) {
 
                     switch( *payload ) {
                         case GNW_CMD_NEW_ADDRESS:
+                            printf( "{New Address}\n" );
                             if( new_address == 0 ) {
                                 new_address = *(gnw_address_t *)(payload + 1);
 

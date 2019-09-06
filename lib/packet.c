@@ -4,6 +4,8 @@
 #include <string.h>
 #include <stddef.h>
 
+//#define DEBUG
+
 uint8_t * packet_write_u8( uint8_t * buffer, uint8_t data )
 {
     *buffer++ = data;
@@ -29,28 +31,51 @@ uint8_t * packet_write_u32( uint8_t * buffer, uint32_t data )
 uint8_t * packet_read_u8( uint8_t * buffer, uint8_t * data )
 {
     *data = *buffer++;
+
+#ifdef DEBUG
+    printf( "{%2x}", *data );
+#endif
+
     return buffer;
 }
 
 uint8_t * packet_read_u16( uint8_t * buffer, uint16_t * data )
 {
     *data = (*buffer << 8) | *(buffer+1);
+
+#ifdef DEBUG
+    printf( "{%4x}", *data );
+#endif
+
     return buffer+2;
 }
 
 uint8_t * packet_read_u32( uint8_t * buffer, uint32_t * data )
 {
     *data = (*(buffer) << 24) | (*(buffer+1) << 16) | (*(buffer+2) << 8) | *(buffer+3);
+
+#ifdef DEBUG
+    printf( "{%8x}", *data );
+#endif
+
     return buffer+4;
 }
 
 
 uint8_t * packet_write_u8_buffer( uint8_t * buffer, uint8_t * data, size_t length ) {
+#ifdef DEBUG
+    printf( "{+%lu}", length );
+#endif
+
     memcpy( buffer, data, length );
     return buffer + length;
 }
 
 uint8_t * packet_write_u16_buffer( uint8_t * buffer, uint16_t * data, size_t length ) {
+#ifdef DEBUG
+    printf( "{+%lu}", length * 2 );
+#endif
+
     uint16_t * ptr = data;
     while( ptr < data + length )
         buffer = packet_write_u16( buffer, *ptr++ );
