@@ -25,16 +25,32 @@
 #include <zconf.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <string.h>
 
 bool _waitFor = false;
+unsigned long _dataLength = 0;
 unsigned long _interval = 1000000;
 unsigned long _messages = 10;
+
+char * _delimiter = "\n";
+char * _preBuffer = NULL;
 
 int main(int argc, char ** argv ) {
 
     int c;
-    while( (c = getopt( argc, argv, "wi:c:" )) != -1 ) {
+    while( (c = getopt( argc, argv, "wi:c:s:d:" )) != -1 ) {
         switch( c ) {
+            case 's':
+                _dataLength = strtoul( optarg, NULL, 10 );
+                _preBuffer = (char *)malloc( _dataLength + 1 );
+                memset( _preBuffer, 0, _dataLength + 1 );
+                memset( _preBuffer, '?', _dataLength );
+                break;
+            
+            case 'd':
+                _delimiter = optarg;
+                break;
+
             case 'i':
                 _interval = strtoul( optarg, NULL, 10 );
                 break;
@@ -58,15 +74,33 @@ int main(int argc, char ** argv ) {
 
     unsigned long cycles = 0;
     while( cycles++ < _messages ) {
-        if( _waitFor )
-            gets( stdin );
+        char input[4096] = { 0 };
+        input[0] = '\0';
 
-        time(&rawTime);
-        timeInfo = localtime(&rawTime);
+        if( _waitFor ) {
+            fgets( input, 4096, stdin );
+            input[strlen(input)-1] = '\0';
+        }
 
-        printf( "%lu:\t%s", cycles, asctime(timeInfo) );
-        fflush( stdout );
         usleep( _interval );
+
+        if( _dataLength > 0 ) {
+            printf( "%s%s", _preBuffer, _delimiter );
+        }
+        else {
+            time( &rawTime );
+            timeInfo = localtime( &rawTime );
+
+            char * timeString = asctime(timeInfo);
+            timeString[24] = '\0';
+
+            if( input[0] == '\0' )
+                printf( "%lu\t%s%s", cycles, timeString, _delimiter );
+            else
+                printf( "%lu\t%s\t%s%s", cycles, timeString, input, _delimiter );
+        }
+
+        fflush( stdout );
     }
 
     return 0;

@@ -306,7 +306,7 @@ void * clientProcess( void * _context ) {
                 context->rx_buffer_tail--;
             }
 
-            printf( "{PKT:%2ld}\n", readyBytes );
+            printf( "{PKT:%ld}\n", readyBytes );
 
             gnw_header_t packet_header  = { 0 };
             uint8_t * ptr = context->rx_buffer;

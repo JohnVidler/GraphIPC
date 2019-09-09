@@ -33,6 +33,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <wait.h>
+#include <assert.h>
 
 #define LOG_NAME "GraphWrap"
 
@@ -705,6 +706,8 @@ int main(int argc, char ** argv ) {
                         // Is this the router FD?
                         if( stream_fd[index].fd == rfd ) {
                             printf("Read %ldB from Router\n", readBytes);
+
+                            assert( config.rx_buffer_tail >= config.rx_buffer );
 
                             config.rx_buffer_tail = packet_write_u8_buffer( config.rx_buffer_tail, iBuffer, readBytes );
 
