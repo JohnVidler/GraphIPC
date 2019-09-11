@@ -26,6 +26,11 @@
 #include "RingBuffer.h"
 #include "packet.h"
 #include "../Log.h"
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 
 volatile gnw_stats_t link_stats;
 
@@ -93,11 +98,6 @@ void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length ) {
 void gnw_emitPacket( int fd, unsigned char * buffer, size_t length ) {
     ssize_t written = write( fd, buffer, length );
     link_stats.bytesWritten += written;
-
-    printf( "\n>>> [ " );
-    for( size_t i = 0; i < length; i++ )
-        printf( "%02x ", buffer[i] );
-    printf( "]\n" );
 }
 
 void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, ssize_t length ) {
@@ -180,8 +180,20 @@ ssize_t gnw_nextPacket( uint8_t * buffer, size_t buffer_length ) {
         return 0;
 
     // Reject a parse if there is no magic byte up front.
-    if( buffer[0] != GNW_MAGIC )
+    if( buffer[0] != GNW_MAGIC ) {
+
+        // Debug: print the first few bytes of the buffer.
+        printf( "Buffer = [" );
+        for(int i=0; i<128; i++) {
+            if( i == buffer_length )
+                printf( "%02x$", buffer[i] );
+            else
+                printf( "%02x ", buffer[i] );
+        }
+        printf( "]\n" );
+
         return -1;
+    }
     
     // Actually parse stuff
     gnw_header_t header = { 0 };

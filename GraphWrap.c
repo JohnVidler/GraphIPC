@@ -109,7 +109,9 @@ int router_fd = -1;
 int getRouterFD() {
     if( router_fd == -1 ) {
         log_info( "Connecting to router at %s:%s...", config.arg_host, config.arg_port );
-        router_fd = socket_connect(config.arg_host, config.arg_port);
+        router_fd = socket_connect( config.arg_host, config.arg_port );
+
+        //printf( "Router FD = %d\n", router_fd );
 
         // Build the other network-related structures
         config.rx_buffer = (uint8_t *)malloc( config.network_mtu * 20 ); // 20 packet(ish) buffer
@@ -171,13 +173,14 @@ gnw_address_t getNodeAddress( gnw_address_t try_address ) {
             memcpy( payload, ptr, header.length );
 
             packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, 11 + header.length );
+            config.rx_buffer_tail -= 11 + header.length;
 
             if( header.version != GNW_VERSION )
                 log_warn( "Warning! Router/Client version mismatch!" );
 
             switch( header.type ) {
                 case GNW_COMMAND | GNW_REPLY: // Command response
-                    printf( "{CMD/RPLY}\n" );
+                    //printf( "{CMD/RPLY}\n" );
                     if( header.length < 1 ) {
                         log_warn( "Router sent a command with no operator, no idea what to do! Trying to skip past it..." );
                         break;
@@ -185,7 +188,7 @@ gnw_address_t getNodeAddress( gnw_address_t try_address ) {
 
                     switch( *payload ) {
                         case GNW_CMD_NEW_ADDRESS:
-                            printf( "{New Address}\n" );
+                            //printf( "{New Address}\n" );
                             if( new_address == 0 ) {
                                 new_address = *(gnw_address_t *)(payload + 1);
 
@@ -433,6 +436,8 @@ void handlePacket( int index, gnw_header_t * header, unsigned char * payload ) {
             // Note: using putc here to avoid issues with null terminators and non-printable streams
             putc(*(payload + i), stdout);
         }
+        fflush( stdout );
+        return;
     }
 
     // Virtual MUX Operation
@@ -683,6 +688,12 @@ int main(int argc, char ** argv ) {
     while( status == 0 ) {
         int rv = -1;
         while( status == 0 && (rv = poll(stream_fd, stream_fd_count, 100)) != -1 ) {
+
+            // Sanity check
+            if( config.rx_buffer > config.rx_buffer_tail ) {
+                log_error( "Buffer in a corrupted state! About to segfault (probably)!\n" );
+            }
+
             int index = 0;
             while( rv > 0 && index < MAX_INPUT_STREAMS ) {
                 if( stream_fd[index].revents != 0 ) {
@@ -699,17 +710,25 @@ int main(int argc, char ** argv ) {
                             status = 1; // Mark us for shutdown.
                         }
 
+                        if( stream_fd[index].fd == STDIN_FILENO ) {
+                            // Stdin closed, pipe must have gone, OK, shut stuff down.
+                            log_error( "STDIN went offline, pipe must have died. Closing down in turn..." );
+                            status = 1;
+                        }
+
                         stream_fd[index].fd = -1;
                     }
 
                     else if( readBytes > 0 ) {
                         // Is this the router FD?
                         if( stream_fd[index].fd == rfd ) {
-                            printf("Read %ldB from Router\n", readBytes);
+                            //printf( "Read %ldB from Router on index = %d\n", readBytes, index );
 
                             assert( config.rx_buffer_tail >= config.rx_buffer );
+                            assert( config.rx_buffer_tail - config.rx_buffer <= config.network_mtu * 20 ); 
 
-                            config.rx_buffer_tail = packet_write_u8_buffer( config.rx_buffer_tail, iBuffer, readBytes );
+                            packet_write_u8_buffer( config.rx_buffer_tail, iBuffer, readBytes );
+                            config.rx_buffer_tail += readBytes;
 
                             uint8_t packet_buffer[config.network_mtu + 1];
                             memset( packet_buffer, 0, config.network_mtu + 1 );
@@ -718,9 +737,11 @@ int main(int argc, char ** argv ) {
 
                                 if( readyBytes < 0 ) {
                                     log_warn( "Network desync, attempting to resync... (Err = %d)", readyBytes );
-                                    // Dump a byte, try to clear the buffer and re-try.
-                                    packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, 1 );
-                                    config.rx_buffer_tail--;
+                                    while( config.rx_buffer[0] != GNW_MAGIC && config.rx_buffer < config.rx_buffer_tail ) {
+                                        printf( "Dumped 1 byte\n" );
+                                        packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, 1 );
+                                        config.rx_buffer_tail--;
+                                    }
                                     continue;
                                 }
 
@@ -737,14 +758,14 @@ int main(int argc, char ** argv ) {
 
                                 // Shift the buffer and sync up the tail pointer
                                 packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, readyBytes );
-                                config.rx_buffer_tail =- readyBytes;
+                                config.rx_buffer_tail = config.rx_buffer_tail - (size_t)readyBytes;
                             }
 
                         }
 
                         // Is this stdin?
                         else if( stream_fd[index].fd == STDIN_FILENO ) {
-                            printf("Read %ldB from STDIN\n", readBytes);
+                            //printf("Read %ldB from STDIN\n", readBytes);
 
                             gnw_emitDataPacket( rfd, config.arg_address, iBuffer, readBytes );
                         }

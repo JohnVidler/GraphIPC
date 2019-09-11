@@ -306,7 +306,7 @@ void * clientProcess( void * _context ) {
                 context->rx_buffer_tail--;
             }
 
-            printf( "{PKT:%ld}\n", readyBytes );
+            //printf( "{PKT:%ld}\n", readyBytes );
 
             gnw_header_t packet_header  = { 0 };
             uint8_t * ptr = context->rx_buffer;
@@ -580,11 +580,12 @@ int router_process() {
     //int ret;
 
     memset( &listen_hints, 0, sizeof listen_hints );
-    listen_hints.ai_family   = AF_UNSPEC;
+    listen_hints.ai_family   = AF_INET;
     listen_hints.ai_socktype = SOCK_STREAM;
-    listen_hints.ai_flags    = AI_PASSIVE;
 
     int listen_fd = getListenSocket( &listen_hints );
+
+    printf( "SockFD = %d\n", listen_fd );
 
     if( listen( listen_fd, ROUTER_BACKLOG ) == -1 ) {
         perror( "listen" );

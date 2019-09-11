@@ -31,6 +31,7 @@ bool _waitFor = false;
 unsigned long _dataLength = 0;
 unsigned long _interval = 1000000;
 unsigned long _messages = 10;
+unsigned long _pauseForSec = 0;
 
 char * _delimiter = "\n";
 char * _preBuffer = NULL;
@@ -38,8 +39,12 @@ char * _preBuffer = NULL;
 int main(int argc, char ** argv ) {
 
     int c;
-    while( (c = getopt( argc, argv, "wi:c:s:d:" )) != -1 ) {
+    while( (c = getopt( argc, argv, "wi:c:s:d:p:" )) != -1 ) {
         switch( c ) {
+            case 'p':
+                _pauseForSec = strtoul( optarg, NULL, 10 );
+                break;
+
             case 's':
                 _dataLength = strtoul( optarg, NULL, 10 );
                 _preBuffer = (char *)malloc( _dataLength + 1 );
@@ -71,6 +76,10 @@ int main(int argc, char ** argv ) {
 
     time_t rawTime;
     struct tm * timeInfo;
+
+    // Pause before starting...
+    if( _pauseForSec > 0 )
+        sleep( _pauseForSec );
 
     unsigned long cycles = 0;
     while( cycles++ < _messages ) {
