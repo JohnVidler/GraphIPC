@@ -454,6 +454,7 @@ void handlePacket( int index, gnw_header_t * header, unsigned char * payload ) {
     if( context == NULL ) {
 
         if( config.arg_mux_policy == MUX_AUTO_SPAWN ) {
+            log_warn( "Unimplemented mux spawn stage!" );
             //
         }
 
@@ -516,8 +517,6 @@ int main(int argc, char ** argv ) {
     // Check the system MTU and match it - this assumes local operation, for now.
     // Note: Possibly add an override for this in the flags...
     config.network_mtu = getIFaceMTU("lo");
-    if (config.network_mtu > 4096) // Excessive copy op.
-        config.network_mtu = 4096;
 
     // Build any remaining structures
     sink_context_list = ll_create();

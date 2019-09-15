@@ -15,6 +15,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
@@ -291,6 +292,8 @@ void * clientProcess( void * _context ) {
         log_debug( "Data on the wire..." );
 
         bytes = read( context->socket_fd, latchBuffer, config.network_mtu );
+
+        assert( bytes <= config.network_mtu, "Buffer over-read!" );
 
         context->rx_buffer_tail = packet_write_u8_buffer( context->rx_buffer_tail, latchBuffer, bytes );
         context->bytes_in += bytes;

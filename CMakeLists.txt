@@ -42,7 +42,7 @@ add_library( Common Log.c Log.h )
 
 add_library( DataStructures lib/RingBuffer.c lib/RingBuffer.h lib/LinkedList.c lib/LinkedList.h lib/avl.c lib/avl.h)
 
-add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h lib/packet.c IndexTable.c IndexTable.h NodeTable.c NodeTable.h ForwardTable.h ForwardTable.c net_io.c net_io.h )
+add_library( GraphNetwork lib/GraphNetwork.c lib/GraphNetwork.h lib/packet.c IndexTable.c IndexTable.h NodeTable.c NodeTable.h ForwardTable.h ForwardTable.c )
 target_link_libraries( GraphNetwork m DataStructures )
 
 add_library( Assert lib/Assert.c lib/Assert.h )

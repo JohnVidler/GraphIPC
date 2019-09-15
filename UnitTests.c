@@ -28,7 +28,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include "net_io.h"
 
 void test_linear_buffer() {
     uint8_t staticBuffer[64] = { 0 };
@@ -240,17 +239,6 @@ void test_btree() {
 
 }
 
-void test_network_library() {
-    io_context_t context;
-
-    int res = io_create( &context, "127.0.0.1", "19000" );
-    assert( res > -1, "IO result non zero!" );
-
-    res = io_sendto( &context, (uint8_t *)"This is just a test\n", 20 );
-    assert( res == 20, "Datagram could not be sent!" );
-
-}
-
 int main(int argc, char ** argv ) {
     setReportAssert( false );
     setExitOnAssert( true );
@@ -269,8 +257,6 @@ int main(int argc, char ** argv ) {
     //test_btree();
 
     //test_network_sync();
-
-    test_network_library();
 
     //test_utility_functions();
 
