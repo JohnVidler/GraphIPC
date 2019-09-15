@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #for LENGTH in {1000..1700000..1000}
-for LENGTH in {1000..1700000..1000}
+for LENGTH in {10000..1700000..1000}
 do
     echo Running test on length = ${LENGTH}
 
@@ -13,13 +13,13 @@ do
 
     ./Graph -a 2000 -o | ../../modified-pv/pv -lrafb -t -i 1 2> 2000.log > /dev/null &
     ./Graph -a 3000 -o | ../../modified-pv/pv -lrafb -t -i 1 2> 3000.log > /dev/null &
-    ./ArgTest -p 4 -i 0 -s 128  -c ${LENGTH} | ../../modified-pv/pv -lrafb -t -i 1 2> 1000.log | ./Graph -a 1000 -i && killall GraphRouter &
+    ./ArgTest -p 4 -i 1000 -s 128  -c ${LENGTH} | ../../modified-pv/pv -lrafb -t -i 1 2> 1000.log | ./Graph -a 1000 -i && killall GraphRouter &
 
     sleep 2
 
     ./GraphRouter -s 1000 -t 2000 -c &
     ./GraphRouter -s 1000 -t 3000 -c &
-    ./GraphRouter -t 1000 --policy roundrobin &
+    ./GraphRouter -t 1000 --policy broadcast &
 
     wait
 

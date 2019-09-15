@@ -19,7 +19,7 @@ do
 
     ./GraphRouter -s 1000 -t 2000 -c &
     ./GraphRouter -s 1000 -t 3000 -c &
-    ./GraphRouter -t 1000 --policy roundrobin &
+    ./GraphRouter -t 1000 --policy anycast &
 
     wait
 
