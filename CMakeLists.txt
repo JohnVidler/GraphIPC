@@ -38,6 +38,36 @@ add_definitions( -DGIT_TAG=${GIT_TAG} )
 configure_file( BuildInfo.h.in ${CMAKE_BINARY_DIR}/generated/BuildInfo.h )
 include_directories( ${CMAKE_BINARY_DIR}/generated/ )
 
+add_library( klib
+        lib/klib/bgzf.c lib/klib/bgzf.h
+        lib/klib/kalloc.c lib/klib/kalloc.h
+        lib/klib/kavl.h
+        lib/klib/kbit.h
+        lib/klib/kbtree.h
+        lib/klib/kdq.h
+        lib/klib/keigen.c lib/klib/keigen.h
+        lib/klib/ketopt.h
+        lib/klib/kexpr.c lib/klib/kexpr.h
+        lib/klib/kgraph.h
+        lib/klib/khash.h
+        lib/klib/khmm.c lib/klib/khmm.h
+        lib/klib/klist.h
+        lib/klib/kmath.c lib/klib/kmath.h
+        lib/klib/knetfile.c lib/klib/knetfile.h
+        lib/klib/knhx.c lib/klib/knhx.h
+        lib/klib/kopen.c
+        lib/klib/krng.h
+        lib/klib/ksa.c
+        lib/klib/kseq.h
+        lib/klib/kson.c lib/klib/kson.h
+        lib/klib/ksort.h
+        lib/klib/kstring.c lib/klib/kstring.h
+        lib/klib/ksw.c lib/klib/ksw.h
+        lib/klib/kthread.c lib/klib/kthread.h
+        lib/klib/kurl.c lib/klib/kurl.h
+        lib/klib/kvec.h
+)
+
 add_library( Common Log.c Log.h )
 
 add_library( DataStructures lib/RingBuffer.c lib/RingBuffer.h lib/LinkedList.c lib/LinkedList.h lib/avl.c lib/avl.h)
@@ -51,7 +81,7 @@ add_executable( Graph GraphWrap.c lib/utility.c lib/utility.h lib/GraphNetwork.h
 target_link_libraries( Graph ${CMAKE_THREAD_LIBS_INIT} Common GraphNetwork DataStructures Assert )
 
 add_executable( GraphRouter GraphRouter.c lib/utility.c lib/utility.h lib/GraphNetwork.h lib/Assert.c lib/Assert.h common.c common.h Log.c Log.h)
-target_link_libraries( GraphRouter ${CMAKE_THREAD_LIBS_INIT} Common GraphNetwork DataStructures Assert )
+target_link_libraries( GraphRouter ${CMAKE_THREAD_LIBS_INIT} Common GraphNetwork DataStructures Assert klib )
 
 add_executable( ArgTest ArgTest.c )
 target_link_libraries( ArgTest Common )

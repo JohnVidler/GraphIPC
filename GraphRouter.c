@@ -38,40 +38,49 @@
 #include <poll.h>
 #include <sys/un.h>
 #include <getopt.h>
+#include "lib/klib/khash.h"
+#include "lib/klib/kvec.h"
+
+#define MAX_MONITOR_FDS 128
 
 #define SYSTEM_ACTIVE 1
 #define SYSTEM_STOP   0
 
 struct _configuration {
-    int network_mtu;
+    size_t network_mtu;
     int system_state;
     int verbosity;
 
     bool arg_dot;
 };
 
-volatile struct _configuration config;
+struct _configuration config;
+
+typedef struct {
+    uint8_t * buffer;
+    uint8_t * buffer_tail;
+} local_buffer_t;
 
 /**
  * Context for a given connection to a running node or subgraph-router.
  */
 typedef struct {
-    pthread_t * thread_state;
-    int socket_fd;
-    uint8_t * rx_buffer;
-    uint8_t * rx_buffer_tail;
+    kvec_t( gnw_address_t ) forward;
+
     int state;
     uint64_t packets_in;
     uint64_t packets_out;
     uint64_t bytes_in;
     uint64_t bytes_out;
-
 } context_t;
 
-// Note: Replace client_list with the address table (table_address)!
+KHASH_MAP_INIT_INT( gnw_address_t, context_t );
+khash_t( gnw_address_t ) * address_table;
 
-linked_list_t    * context_list;
-volatile gnw_address_t nextNodeAddress = 0;
+KHASH_MAP_INIT_INT( int, local_buffer_t );
+khash_t( int ) * local_buffer;
+
+/*volatile gnw_address_t nextNodeAddress = 0;
 
 gnw_address_t genNextValidAddress() {
     nextNodeAddress += 0x1000;
@@ -79,14 +88,14 @@ gnw_address_t genNextValidAddress() {
         nextNodeAddress += 0x1000;
 
     if( nextNodeAddress == 0 ) {
-        log_write(SEVERE, "Address pool exhaustion! No more addresses!");
+        log_write( SEVERE, "Address pool exhaustion! No more addresses!" );
         exit( EXIT_FAILURE ); // Note: this is a really, really bad way to handle this, but it'll save us from bad internal state mangling the output, kinda :|
     }
 
     log_debug( "Next addresss = %08x\n", nextNodeAddress );
 
     return nextNodeAddress;
-}
+}*/
 
 int getListenSocket( struct addrinfo * hints ) {
     int ret;
@@ -228,359 +237,206 @@ void emitStatistics( FILE * stream ) {
     fprintf( stream, "\n" );
 }
 
-void context_cleanup( context_t * context ) {
-    context->state = GNW_STATE_CLOSE;
-    close( context->socket_fd );
-    context->rx_buffer_tail = NULL;
-    free( context->rx_buffer );
+void reset_context( context_t * context ) {
+    context->packets_in = 0;
+    context->packets_out = 0;
+    context->bytes_in = 0;
+    context->bytes_out = 0;
+    context->state = -1;
 
-    // Become zombie, in case cleanup fails
-    context->state = GNW_STATE_ZOMBIE;
-
-    free( context );
+    kv_destroy( context->forward );
 }
 
-void * clientProcess( void * _context ) {
-    context_t * context = (context_t *)_context;
-    context->state = GNW_STATE_OPEN;
+void setup_context( context_t * context ) {
+    reset_context( context );
+    kv_init( context->forward );
+}
 
-    // Fire up our ring buffer
-    context->rx_buffer = (uint8_t *)malloc( config.network_mtu * 20 ); // 20 packets of MTU-size
-    context->rx_buffer_tail = context->rx_buffer;
+void handle_packet( int fd, uint8_t * buffer, size_t length ) {
+    assert( buffer != NULL, "Attempted to parse a null buffer!" );
+    assert( length > 0, "Attempted to parse an empty (zero-length) buffer!" );
 
-    log_info( "Client poll loop running..." );
-
-    struct pollfd watch_fd[1];
-    memset( watch_fd, 0, sizeof( struct pollfd ) * 1 );
-
-    watch_fd[0].fd = context->socket_fd;
-    watch_fd[0].events = POLLIN;
-
-    unsigned char latchBuffer[config.network_mtu];
-
-    int tick_rate = 1000;
-    int logout_timeout = 10;
-    ssize_t bytes = 1;
-    while( bytes > 0 ) {
-        log_debug( "Poll..." );
-        int rv = poll( watch_fd, 1, tick_rate );
-
-        // Wait error, drop back to callee
-        if( rv == -1 ) {
-            log_error( "IO Error, dropping client.\n" );
-            context_cleanup( context );
-            return NULL;
-        }
-
-        // Timeout...
-        if( rv == 0 ) {
-            log_debug( "Timeout" );
-            if( context->state == GNW_STATE_OPEN ) {
-                if (logout_timeout-- < 0) {
-                    log_warn( "Client timed out, dropping them.\n" );
-                    context_cleanup( context );
-                    return NULL;
-                }
-
-                gnw_emitCommandPacket( context->socket_fd, GNW_DATA, NULL, 0 ); // Poke the client with a null data packet
+    gnw_header_t header;
+    uint8_t * payload = gnw_parse_header( buffer, &header );
+    
+    switch( header.type ) {
+        case GNW_COMMAND:
+            if( header.length == 0 ) {
+                log_warn( "Client issued a command with no directive, nothing to do!" );
+                return;
             }
 
-            continue;
-        }
-        logout_timeout = 10; // Timeout reset, we have data.
+            uint8_t directive = 0;
+            uint8_t * next = packet_read_u8( payload, &directive );
 
-        log_debug( "Data on the wire..." );
+            switch( directive ) {
+                // Handle new address requests - bit of a misnomer, as this actually really 'claims' an address
+                // rather than creating a new one. Essentially 'binds' the address to the fd the request came
+                // from
+                case GNW_CMD_NEW_ADDRESS:
+                    log_debug( "New address request" );
 
-        bytes = read( context->socket_fd, latchBuffer, config.network_mtu );
+                    // Generate a random address, else use the requested one.
+                    gnw_address_t address_req = 0xFFFFF000 & rand(); // Random address
+                    if( header.length == 5 )
+                        packet_read_u32( next, &address_req );
 
-        assert( bytes <= config.network_mtu, "Buffer over-read!" );
+                    int status;
+                    khint_t hint = kh_put( gnw_address_t, address_table, address_req, &status );
+                    context_t * context = &kh_value( address_table, hint );
+                    setup_context( context );
 
-        context->rx_buffer_tail = packet_write_u8_buffer( context->rx_buffer_tail, latchBuffer, bytes );
-        context->bytes_in += bytes;
-        context->packets_in++;
-
-        log_debug( "Parsing..." );
-        ssize_t readyBytes = -1;
-        while( (readyBytes = gnw_nextPacket( context->rx_buffer, context->rx_buffer_tail - context->rx_buffer )) != 0 ) {
-
-            if( readyBytes < 0 ) {
-                printf( "DESYNC...\n" );
-                packet_shift( context->rx_buffer, config.network_mtu * 20, NULL, 1 );
-                context->rx_buffer_tail--;
-            }
-
-            //printf( "{PKT:%ld}\n", readyBytes );
-
-            gnw_header_t packet_header  = { 0 };
-            uint8_t * ptr = context->rx_buffer;
-            ptr = packet_read_u8( ptr, &packet_header.magic );
-            ptr = packet_read_u8( ptr, &packet_header.version );
-            ptr = packet_read_u8( ptr, &packet_header.type );
-            ptr = packet_read_u32( ptr, &packet_header.source );
-            ptr = packet_read_u32( ptr, &packet_header.length );
-
-            uint8_t packet_payload[config.network_mtu]; // Static buffer to avoid malloc'ing :)
-            memcpy( packet_payload, ptr, packet_header.length );
-
-            // Shift the buffer along, so we don't have to worry about it later
-            packet_shift( context->rx_buffer, config.network_mtu * 20, NULL, 11 + packet_header.length );
-            context->rx_buffer_tail -= 11 + packet_header.length;
-
-            log_debug( "RX: Type = %x, Length = %u", packet_header.type, packet_header.length );
-
-            switch( packet_header.type ) {
-                case GNW_DATA: {
-                    // Check out any edges for this source...
-                    forward_t *forward = forward_table_find(packet_header.source);
-
-                    // Fast exit, if there are no links associated with this node
-                    if (forward == NULL || forward->edgeList == NULL)
-                        break;
-
-                    switch (forward->forward_policy) { 
-                        case GNW_POLICY_BROADCAST: {
-                            pthread_mutex_lock(&forward->listLock);
-                            edge_t *iter = forward->edgeList;
-                            while (iter != NULL) {
-                                context_t *remote = iter->context;
-                                if (remote == NULL) {
-                                    remote = node_table_find(iter->target);
-                                    iter->context = remote;
-                                    log_info(
-                                            "Populated [%08x]'s context reference, subsequent lookups will be faster :)",
-                                            iter->target);
-                                }
-
-                                if (remote == NULL) {
-                                    log_write(SEVERE,
-                                              "Somehow, target [%08x] managed to get into [%08x]'s forward list! Something is very wrong!",
-                                              iter->target, packet_header.source);
-                                    log_write(SEVERE, "Giving up on this broadcast, to save the rest of the graph!");
-                                    pthread_mutex_unlock(&forward->listLock);
-                                    break;
-                                }
-
-                                gnw_emitDataPacket(remote->socket_fd, packet_header.source, packet_payload,
-                                                   packet_header.length);
-                                context->bytes_out += packet_header.length;
-                                context->packets_out++;
-                                remote->bytes_in += packet_header.length;
-                                remote->packets_in++;
-
-                                iter = iter->next;
-                            }
-                            pthread_mutex_unlock(&forward->listLock);
-                            break;
-                        }
-
-                        case GNW_POLICY_ANYCAST: {
-                            pthread_mutex_lock(&forward->listLock);
-
-                            edge_t *target = forward->edgeList;
-                            edge_t *iter = forward->edgeList;
-                            for (int probability = 2; iter != NULL; probability++) {
-                                if (rand() % probability == 0)
-                                    target = iter;
-                                iter = iter->next;
-                            }
-
-                            context_t *remote = target->context;
-                            if (remote == NULL) {
-                                remote = node_table_find(iter->target);
-                                iter->context = remote;
-                                log_info("Populated [%08x]'s context reference, subsequent lookups will be faster :)",
-                                         iter->target);
-                            }
-
-                            // Guard against
-                            if (remote != NULL) {
-                                gnw_emitDataPacket(remote->socket_fd, packet_header.source, packet_payload,
-                                                   packet_header.length);
-                                context->bytes_out += packet_header.length;
-                                context->packets_out++;
-                                remote->bytes_in += packet_header.length;
-                                remote->packets_in++;
-                            }
-
-                            pthread_mutex_unlock(&forward->listLock);
-                            break;
-                        }
-
-                        case GNW_POLICY_ROUNDROBIN:
-                            pthread_mutex_lock(&forward->listLock);
-                            if (forward->round_robin_ref == NULL)
-                                forward->round_robin_ref = forward->edgeList;
-
-                            // Just bail if we don't have anything to work with, just in case!
-                            if (forward->round_robin_ref == NULL) {
-                                pthread_mutex_unlock(&forward->listLock);
-                                break;
-                            }
-
-                            // Find the context for this address, by lookup or by fast reference
-                            context_t *remote = forward->round_robin_ref->context;
-                            if (remote == NULL) {
-                                remote = node_table_find(forward->round_robin_ref->target);
-                                forward->round_robin_ref->context = remote;
-                                log_info("Populated [%08x]'s context reference, subsequent lookups will be faster :)",
-                                         forward->round_robin_ref->target);
-                            }
-
-                            gnw_emitDataPacket(remote->socket_fd, packet_header.source, packet_payload,
-                                               packet_header.length);
-                            context->bytes_out += packet_header.length;
-                            context->packets_out++;
-                            remote->bytes_in += packet_header.length;
-                            remote->packets_in++;
-
-                            forward->round_robin_ref = forward->round_robin_ref->next;
-                            pthread_mutex_unlock(&forward->listLock);
-                            break;
-                    }
-
-                    break;
-                }
-
-                case GNW_COMMAND:
-                    if( packet_header.length < 1 ) {
-                        log_warn( "Client sent a command with no operator, skipping." );
-                        break;
-                    }
-
-                    // Select based on the first byte -> The operator
-                    switch( *packet_payload ) {
-                        case GNW_CMD_NEW_ADDRESS:
-                            log_info( "New address request" );
-
-                            gnw_address_t fresh_address = genNextValidAddress();
-
-                            if( packet_header.length != 1 ) {
-                                gnw_address_t * reqAddress = (gnw_address_t *)(packet_payload+1);
-                                gnw_address_t nodeMask = (~(unsigned)0) ^ (unsigned)0xFF;
-
-                                if( (*reqAddress & nodeMask) == *reqAddress ) {
-                                    log_info( "Context requested a specific address [%08x], checking for availability\n", *reqAddress );
-
-                                    if( node_table_find( *reqAddress ) != NULL ) {
-                                        log_warn( "Address already in use, refusing the claim on [%08x]", *reqAddress );
-                                    }
-                                    else
-                                        fresh_address = *reqAddress;
-                                }
-                                else {
-                                    log_warn( "Bad request address - node addresses cannot be non-zero in the last octet! Using generated address instead." );
-                                }
-                            }
-
-                            // Actually become a node at this point - up to now, this could have just been a context_t reference to a thread...
-                            node_table_add( fresh_address, context );
-
-                            unsigned char * replyBuffer = malloc( sizeof(gnw_address_t) + 1 );
-                            *replyBuffer = GNW_CMD_NEW_ADDRESS;
-                            gnw_address_t * payload = (gnw_address_t *)(replyBuffer + 1);
-                            *payload = fresh_address;
-                            gnw_emitCommandPacket( context->socket_fd, GNW_COMMAND | GNW_REPLY, replyBuffer, sizeof(gnw_address_t)+1 );
-                            free( replyBuffer );
-
-                            // Going live (run state)
-                            if( context->state == GNW_STATE_OPEN ) {
-                                context->state = GNW_STATE_RUN;
-                                log_info( "Client going to RUN state, will not time out." );
-                                tick_rate = 10000; // Now tick at 10 second intervals, just so we don't spin unnecessarily
-                            }
-                            break;
-
-                        case GNW_CMD_STATUS:
-                            log_info( "Status request.\n" );
-
-                            emitStatistics( stdout );
-
-                            break;
-
-                        case GNW_CMD_POLICY: {
-                            log_info( "Node policy change." );
-
-                            unsigned char newPolicy = *(packet_payload + 1);
-                            gnw_address_t target = *(gnw_address_t *) (packet_payload + 2);
-
-                            if( target < 1 ) {
-                                log_warn( "No endpoint can ever be address zero!" );
-                                break;
-                            }
-
-                            forward_t * forward = forward_table_find( target );
-                            if( forward == NULL ) {
-                                log_error( "No such valid address [%08x], ignored request", target );
-                                break;
-                            }
-
-                            log_info( "[%08x] policy changed from %d to %d", target, forward->forward_policy, newPolicy );
-                            forward->forward_policy = newPolicy;
-
-                            break;
-                        }
-
-
-                        case GNW_CMD_CONNECT: {
-                            gnw_address_t source_address = *(gnw_address_t *) (packet_payload + 1);
-                            gnw_address_t target_address = *(gnw_address_t *) (packet_payload + 1 + sizeof(gnw_address_t));
-
-                            log_info( "Node connect request [%08x] -> [%08x]", source_address, target_address );
-
-                            // Try to grab the source context, if any
-                            context_t *source = node_table_find(source_address);
-                            if (source == NULL) {
-                                fprintf(stderr, "No such valid source address -> %ux\n", source_address);
-                                break;
-                            }
-
-                            // Try to grab the target context, if any
-                            context_t *target = node_table_find(target_address);
-                            if (target == NULL) {
-                                fprintf(stderr, "No such valid target address -> %ux\n", target_address);
-                                break;
-                            }
-
-                            forward_table_add_edge(source_address, target_address);
-                            break;
-                        }
-
-                        default:
-                            log_warn( "Unknown command, skipped" );
-                            break;
-                    }
+                    // Reply to the client with their assigned address
+                    uint8_t reply[5] = { 0 };
+                    uint8_t * next = packet_write_u8( reply, GNW_CMD_NEW_ADDRESS );
+                    //next = packet_write_u32( next, 0x1000 );
+                    next = packet_write_u32( next, address_req ); // Just accept _any_ address from the clients for now...
+                    gnw_emitCommandPacket( fd, GNW_COMMAND, reply, 5 );
 
                     break;
 
                 default:
-                    //fprintf( stderr, "%s\tBad response from client, skipping.\n", clientAddress );
-                    //gnw_dumpPacket( stdout, iBuffer, packet_length );
-                    break;
+                    log_warn( "Missing handler for command directive %02x", payload[0] );
+            }
+
+            break;
+
+        case GNW_DATA:
+            gnw_dumpPacket( stdout, buffer, length );
+            break;
+
+        default:
+            log_warn( "Unknown header type %02x, ignored, may be build mismatch?", header.type );
+            gnw_dumpPacket( stdout, buffer, length );
+    }
+
+}
+
+void handle_event( int index, struct pollfd * pollStruct, uint8_t * buffer, ssize_t length ) {
+    // Is this an error?
+    if( (pollStruct->revents & POLLIN) != POLLIN || length < 1 ) {
+
+        // If we have an active buffer, kill it now.
+        khint_t iter = kh_get( int, local_buffer, pollStruct->fd );
+        if( iter != kh_end( local_buffer ) ) {
+            printf( "Killing local buffer for %d\n", pollStruct->fd );
+            kh_value( local_buffer, iter ).buffer_tail = NULL;
+            if( kh_value( local_buffer, iter ).buffer != NULL )
+                free( kh_value( local_buffer, iter ).buffer );
+            kh_value( local_buffer, iter ).buffer = NULL;
+            khint_t delHint = kh_get( int, local_buffer, pollStruct->fd );
+            kh_del( int, local_buffer, delHint );
+        }
+
+        // Kill the poll structure data
+        close( pollStruct->fd );
+        pollStruct->fd = -1;
+        pollStruct->events = 0;
+        pollStruct->revents = 0;
+
+        log_error( "SOCKET ERROR, dropped client" );
+        return;
+    }
+
+    // Try and get the local buffer reference
+    khint_t iter = kh_get( int, local_buffer, pollStruct->fd );
+
+    printf( "Iter = %d\n", iter );
+
+    kh_exist( local_buffer, iter );
+
+    // If it's not there, make one!
+    if( iter == kh_end( local_buffer ) ) {
+        printf( "Creating new buffer space...\n" );
+
+        int state = 0;
+        iter = kh_put( int, local_buffer, pollStruct->fd, &state );
+        local_buffer_t * newBuffer = &kh_value( local_buffer, iter );
+
+        printf( "State = %d\n", state );
+        assert( newBuffer != NULL, "Failed to add a new buffer!" );
+
+        newBuffer->buffer = malloc( config.network_mtu * 20 );
+        newBuffer->buffer_tail = kh_value( local_buffer, iter ).buffer;
+
+        assert( newBuffer->buffer != NULL, "NULL buffer reference after malloc" );
+        assert( newBuffer->buffer_tail != NULL, "Null tail reference after malloc" );
+        assert( newBuffer->buffer == newBuffer->buffer_tail, "Tail/Buffer mismatch after malloc" );
+    }
+
+    printf( "Iter = %d\n", iter );
+    printf( "Ptr = %p\n", kh_value(local_buffer, iter) );
+
+    printf( "Local Buffers (%d):\n", kh_size( local_buffer ) );
+    iter = kh_begin( local_buffer );
+    while( iter != kh_end( local_buffer ) ) {
+        int fd = kh_key( local_buffer, iter );
+        local_buffer_t * buffer = &kh_value( local_buffer, iter );
+
+        // Only bother rendering stuff with actual buffers!
+        if( &kh_value( local_buffer, iter ) != NULL ) {
+            if( kh_value( local_buffer, iter ).buffer == NULL ) {
+                printf( "\t|->\tfd=%d, length=0, (*NULL)\n", fd );
+            }
+            else {
+                ssize_t length = (buffer->buffer_tail - buffer->buffer);
+
+                printf( "\t|->\tfd=%d, length=%ld\n", fd, length );
             }
         }
 
+        iter++;
+    }
+    printf( "\n" );
+
+    // Update iter and pull the buffer reference
+    iter = kh_get( int, local_buffer, pollStruct->fd );
+    local_buffer_t * local = &kh_value( local_buffer, iter );
+
+    assert( local->buffer != NULL, "Buffer reference was null!" );
+    assert( local->buffer_tail != NULL, "Buffer tail reference was null!" );
+
+    size_t buffer_size = (local->buffer_tail - local->buffer);
+    size_t remaining_buffer = (config.network_mtu * 20) - buffer_size;
+
+    memcpy( local->buffer_tail, buffer, length );
+    local->buffer_tail += length;
+    buffer_size += length;
+
+    // Attempt to find a packet frame, then pass it on...
+    ssize_t ready_bytes = 0;
+    while( (ready_bytes = gnw_nextPacket( local->buffer, buffer_size )) < 0 ) {
+        packet_shift( local->buffer, buffer_size, NULL, 1 );
+        remaining_buffer++;
+        buffer_size--;
     }
 
-    log_info( "State: CLOSE" );
-    context_cleanup( context );
-    return NULL;
-}
+    // After that, is there any buffer left?
+    if( ready_bytes > 0 ) {
+        log_debug( "Packet" );
+        // Isolate, copy and forward
+        uint8_t packet[config.network_mtu];
+        packet_shift( local->buffer, buffer_size, packet, ready_bytes );
+        local->buffer_tail -= ready_bytes;
 
-// Just emit some stats ever 5 seconds
-void * status_process( void * notused ) {
-    while( config.system_state ) {
-        emitStatistics( stdout );
+        assert( local->buffer_tail >= local->buffer, "Buffer under-run!" );
 
-        sleep( 10 );
+        handle_packet( pollStruct->fd, packet, ready_bytes );
     }
-    return NULL; // Should never happen...
 }
 
 int router_process() {
 
     // Set up the socket server
     struct addrinfo listen_hints;
-    //int ret;
+
+    // Set up the (empty) address hashtable
+    // Tracks on GNW addresses (uint32s)
+    address_table = kh_init( gnw_address_t );
+
+    // Set up a local buffer table, to track each connection
+    // Tracks on file descriptors (ints)
+    local_buffer = kh_init( int );
 
     memset( &listen_hints, 0, sizeof listen_hints );
     listen_hints.ai_family   = AF_INET;
@@ -588,50 +444,136 @@ int router_process() {
 
     int listen_fd = getListenSocket( &listen_hints );
 
-    printf( "SockFD = %d\n", listen_fd );
-
     if( listen( listen_fd, ROUTER_BACKLOG ) == -1 ) {
         perror( "listen" );
         exit( EXIT_FAILURE );
     }
 
-    // Set up the address and forward tables
-    printf( "Node Table: " );
-    node_table_init();
+    struct pollfd poll_list[MAX_MONITOR_FDS] = { 0 };
+    for( int i=0; i<MAX_MONITOR_FDS; i++ )
+        poll_list[i].fd = -1; // Mark as non-monitored
 
-    printf( "Forward Table: " );
-    forward_table_init();
+    poll_list[0].fd = listen_fd;
+    poll_list[0].events = POLLIN;
+    poll_list[0].revents = 0;
 
-    context_list  = ll_create();
-
-    // Begin running the status process (maybe this should become a watchdog in the future?)
-    printf( "STATUS CREATE\n" );
-    pthread_t status_context = { 0 };
-    pthread_create( &status_context, NULL, status_process, NULL );
-    pthread_detach( status_context );
+    uint8_t buffer[config.network_mtu];
 
     while( config.system_state ) {
-        struct sockaddr_storage remote_socket;
-        socklen_t newSock_len = sizeof( socklen_t );
-        int remote_fd = accept( listen_fd, (struct sockaddr *)&remote_socket, &newSock_len );
-        if( remote_fd == -1 ) {
-            perror( "accept" );
-            continue;
+
+        printf( "Known Addresses:\n" );
+        khint_t iter = kh_begin( address_table );
+        while( iter != kh_end( address_table ) ) {
+            if( kh_exist( address_table, iter ) )
+                fprintf( stderr, "\t|->\t%08x\n", kh_key( address_table, iter ) );
+
+            iter++;
         }
 
-        printf( "SOCK: %d\n", remote_fd );
+        printf( "Local Buffers (%d):\n", kh_size( local_buffer ) );
+        iter = kh_begin( local_buffer );
+        while( iter != kh_end( local_buffer ) ) {
+            if( kh_exist( local_buffer, iter ) ) {
+                int fd = kh_key( local_buffer, iter );
+                local_buffer_t * buffer = &kh_value( local_buffer, iter );
+                ssize_t length = (buffer->buffer_tail - buffer->buffer);
 
-        context_t *new_context = malloc(sizeof(context_t));
-        memset(new_context, 0, sizeof(context_t));
-        new_context->thread_state = malloc(sizeof(pthread_t));
-        new_context->socket_fd = remote_fd;
+                printf( "\t|->\tfd=%d, length=%ld\n", fd, length );
+            }
 
-        ll_append( context_list, new_context );
+            iter++;
+        }
+        printf( "\n" );
 
-        int result = pthread_create( new_context->thread_state, NULL, clientProcess, new_context );
-        assert( !result, "Could not create a new child process!" );
-        pthread_detach( *new_context->thread_state ); // Release the thread, so it auto cleans on exit without a join()
+        int events = -1;
+        while( (events = poll( poll_list, MAX_MONITOR_FDS, 1000 )) > 0 ) {
+
+            // Is this an event on the listen socket?
+            if( poll_list[0].revents != 0 ) {
+                log_info( "New connection." );
+
+                struct sockaddr_storage remote_socket;
+                socklen_t newSock_len = sizeof( socklen_t );
+                int remote_fd = accept( listen_fd, (struct sockaddr *)&remote_socket, &newSock_len );
+                if( remote_fd == -1 ) {
+                    perror( "accept" );
+                    continue;
+                }
+
+                // Push this new socket onto a blank on the poll list
+                int entry = 1;
+                for( entry=1; entry<MAX_MONITOR_FDS; entry++ ) {
+                    if( poll_list[entry].fd == -1 ) {
+                        poll_list[entry].fd = remote_fd;
+                        poll_list[entry].events = POLLIN;
+                        break;
+                    }
+                }
+
+                if( poll_list[entry].fd != remote_fd ) {
+                    log_warn( "No more free sockets, dropping the new one." );
+                    close( remote_fd );
+                    poll_list[0].revents = 0;
+                    continue;
+                }
+
+                // Manual reset. Not sure if we actually need this...
+                poll_list[0].revents = 0;
+                continue;
+            }
+
+            // If we're here, it must be one of the other monitored fd's
+            for( int i=1; i<MAX_MONITOR_FDS; i++ ) {
+
+                // Skip any empty FDs
+                if( poll_list[i].fd == -1 )
+                    continue;
+
+                // Handle any events on this fd
+                if( poll_list[i].revents != 0 ) {
+
+                    // If the socket is gone, just drop the fd and continue the scan.
+                    if( (poll_list[i].revents & POLLHUP) == POLLHUP ) {
+
+                        // If we have an active buffer, kill it now.
+                        khint_t iter = kh_get( int, local_buffer, poll_list[i].fd );
+                        if( iter != kh_end( local_buffer ) ) {
+                            printf( "Killing local buffer for %d\n", poll_list[i].fd );
+                            kh_value( local_buffer, iter ).buffer_tail = NULL;
+                            if( kh_value( local_buffer, iter ).buffer != NULL )
+                                free( kh_value( local_buffer, iter ).buffer );
+
+                            kh_value( local_buffer, iter ).buffer = NULL;
+                            khint_t delHint = kh_get( int, local_buffer, poll_list[i].fd );
+                            kh_del( int, local_buffer, delHint );
+                        }
+
+                        // Kill the poll structure data
+                        close( poll_list[i].fd );
+                        poll_list[i].fd = -1;
+                        poll_list[i].events = 0;
+                        poll_list[i].revents = 0;
+
+                        continue;
+                    }
+
+                    // Reset the buffer, just in case (drop this for speed, but danger!)
+                    memset( buffer, 0, config.network_mtu );
+
+                    // Pull any bytes on the wire
+                    ssize_t length = read( poll_list[i].fd, buffer, config.network_mtu );
+
+                    // Push the event to the event handler.
+                    handle_event( i, &(poll_list[i]), buffer, length );
+
+                    // Reset the event flags, and continue.
+                    poll_list[i].revents = 0;
+                }
+            }
+        }
     }
+
+    kh_destroy( gnw_address_t, address_table );
 
     if( listen_fd != -1 )
         close( listen_fd );

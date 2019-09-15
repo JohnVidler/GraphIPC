@@ -65,7 +65,8 @@ avl_find (const struct avl_table *tree, const void *item)
 {
   const struct avl_node *p;
 
-  assert (tree != NULL && item != NULL);
+  assert( tree != NULL );
+  assert( item != NULL );
   for (p = tree->avl_root; p != NULL; )
     {
       int cmp = tree->avl_compare (item, p->avl_data, tree->avl_param);

@@ -9,8 +9,6 @@
 
 bool bailOnAssertFail = false;
 bool reportAssertCalls = false;
-unsigned int testsPassed = 0;
-unsigned int testsFailed = 0;
 
 bool _assert( bool state, char * errorMessage, char * file, int line ) {
     if( reportAssertCalls ) {
@@ -21,13 +19,12 @@ bool _assert( bool state, char * errorMessage, char * file, int line ) {
     if( !state ) {
         fprintf( stderr, "%s:%u\tASSERT: %s\n", file, line, errorMessage );
         fflush( stderr );
-        testsFailed++;
 
         if( bailOnAssertFail )
             exit( EXIT_FAILURE );
         return false;
     }
-    testsPassed++;
+
     return true;
 }
 
@@ -40,7 +37,6 @@ bool _assertj( bool state, char * errorMessage, void (* jumpTarget)(char *, int)
     if( !state ) {
         fprintf( stderr, "%s:%u\tASSERT: %s\n", file, line, errorMessage );
         fflush( stderr );
-        testsFailed++;
 
         jumpTarget( file, line );
 
@@ -49,7 +45,6 @@ bool _assertj( bool state, char * errorMessage, void (* jumpTarget)(char *, int)
 
         return false;
     }
-    testsPassed++;
     return true;
 }
 

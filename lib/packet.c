@@ -25,6 +25,7 @@ uint8_t * packet_write_u32( uint8_t * buffer, uint32_t data )
     *buffer++ = (data >> 16) & 0xFF;
     *buffer++ = (data >> 8) & 0xFF;
     *buffer++ = data & 0xFF;
+    
     return buffer;
 }
 
@@ -52,7 +53,7 @@ uint8_t * packet_read_u16( uint8_t * buffer, uint16_t * data )
 
 uint8_t * packet_read_u32( uint8_t * buffer, uint32_t * data )
 {
-    *data = (*(buffer) << 24) | (*(buffer+1) << 16) | (*(buffer+2) << 8) | *(buffer+3);
+    *data = (*(buffer+3) << 24) | (*(buffer+2) << 16) | (*(buffer+1) << 8) | *(buffer);
 
 #ifdef DEBUG
     printf( "{%8x}", *data );
@@ -60,7 +61,6 @@ uint8_t * packet_read_u32( uint8_t * buffer, uint32_t * data )
 
     return buffer+4;
 }
-
 
 uint8_t * packet_write_u8_buffer( uint8_t * buffer, uint8_t * data, size_t length ) {
 #ifdef DEBUG

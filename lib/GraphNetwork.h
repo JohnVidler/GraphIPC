@@ -87,7 +87,7 @@ typedef struct {
     uint32_t      length;
 } gnw_header_t;
 
-void gnw_format_address( char * buffer, uint64_t address );
+void gnw_format_address( char * buffer, gnw_address_t address );
 
 void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length );
 
@@ -100,3 +100,4 @@ void gnw_sendCommand( int fd, uint8_t command );
 void gnw_request_connect( int fd, gnw_address_t _source, gnw_address_t _target );
 
 ssize_t gnw_nextPacket( uint8_t * buffer, size_t buffer_size );
+uint8_t * gnw_parse_header( uint8_t * buffer, gnw_header_t * header );

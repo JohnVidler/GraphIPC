@@ -1,5 +1,5 @@
 //
-// Created by john on 14/12/17.
+// Created by John Vidler
 //
 
 #pragma once

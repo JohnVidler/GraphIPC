@@ -28,16 +28,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include "lib/klib/khash.h"
+#include "lib/klib/kvec.h"
 
 void test_linear_buffer() {
     uint8_t staticBuffer[64] = { 0 };
     uint8_t * ptr = staticBuffer;
 
-    printf( "Writing to buffer...\n" );
+    log_debug( "Writing to buffer...\n" );
     for( uint8_t i=0; i<32; i++ )
         ptr = packet_write_u8( ptr, i % 25 );
     
-    printf( "Reading back from buffer...\n" );
+    log_debug( "Reading back from buffer...\n" );
     uint8_t out = 0;
     ptr = staticBuffer;
     for( uint8_t i=0; i<32; i++ ) {
@@ -46,18 +48,14 @@ void test_linear_buffer() {
     }
 
 
-    printf( "Resetting buffer...\n" );
+    log_debug( "Resetting buffer...\n" );
     ptr = staticBuffer;
     for( uint8_t i=0; i<32; i++ )
         ptr = packet_write_u8( ptr, i % 25 );
     
-    printf( "Reading back via shift...\n" );
+    log_debug( "Reading back via shift...\n" );
     for( uint8_t i=0; i<32; i++ ) {
-        for( int j=0; j<32; j++ )
-            printf( "%2x ", *(staticBuffer+j) );
-        printf( "\n" );
-
-        uint8_t * end = packet_shift( staticBuffer, 64, &out, 1 );
+        packet_shift( staticBuffer, 64, &out, 1 );
         assertEqual( out, i % 25 );
     }
 
@@ -79,7 +77,7 @@ void test_ring_buffer() {
 
     assert( ringbuffer_write( buffer, testString, 12 ) == 0, "This write should have failed, buffer is incapable of holding the data" );
 
-    printf( "Length: %lu\n", ringbuffer_length(buffer) );
+    log_debug( "Length: %lu\n", ringbuffer_length(buffer) );
     assert(ringbuffer_length(buffer) == 120, "Buffer should have 120B of data at this point." );
 
     for( int i=0; i<20; i++ ) {
@@ -128,11 +126,11 @@ void test_network_sync() {
             rx_buffer_tail = packet_write_u32( rx_buffer_tail, next++ );
             rx_buffer_tail = packet_write_u32( rx_buffer_tail, 0 );
         }
-        dump_buffer( rx_buffer, rx_buffer_tail - rx_buffer );
+        //dump_buffer( rx_buffer, rx_buffer_tail - rx_buffer );
 
         ssize_t readyBytes = 0;
         while( (readyBytes = gnw_nextPacket( rx_buffer, rx_buffer_tail - rx_buffer )) != 0 ) {
-            printf( "Bytes = %ld\n", readyBytes );
+            log_debug( "Bytes = %ld\n", readyBytes );
 
             // Are we in some invalid buffer state?
             if( readyBytes < 0 ) {
@@ -140,7 +138,7 @@ void test_network_sync() {
                 // Dump a byte, try to clear the buffer and re-try.
                 packet_shift( rx_buffer, 512, NULL, 1 );
                 rx_buffer_tail--;
-                dump_buffer( rx_buffer, rx_buffer_tail - rx_buffer );
+                //dump_buffer( rx_buffer, rx_buffer_tail - rx_buffer );
                 continue;
             }
 
@@ -159,14 +157,14 @@ void test_network_sync() {
             assertEqual( header.length, 0 );
 
             assertEqual( expect, header.source );
-            //printf( "Addr: %ld\n", header.source );
+            //log_debug( "Addr: %ld\n", header.source );
             
             expect++;
             packet_shift( rx_buffer, 512, NULL, readyBytes );
             rx_buffer_tail -= readyBytes;
 
-            printf( "Packet OK\n" );
-            dump_buffer( rx_buffer, rx_buffer_tail - rx_buffer );
+            log_debug( "Packet OK\n" );
+            //dump_buffer( rx_buffer, rx_buffer_tail - rx_buffer );
         }
 
         
@@ -179,15 +177,15 @@ void test_utility_functions() {
     for( uint64_t i=0; i<10; i++ ) {
         test_size = test_size * 100;
 
-        printf( "%lu B =>", test_size );
+        log_debug( "%lu B =>", test_size );
 
         char * iec_suffix = "?";
         double iec_formatted_size = fmt_iec_size( test_size, &iec_suffix );
-        printf( "\t%.2f %s =>", iec_formatted_size, iec_suffix );
+        log_debug( "\t%.2f %s =>", iec_formatted_size, iec_suffix );
 
         char * si_suffix = "?";
         double si_formatted_size = fmt_si_size( test_size, &si_suffix );
-        printf( "\t%.2f %s\n", si_formatted_size, si_suffix );
+        log_debug( "\t%.2f %s\n", si_formatted_size, si_suffix );
     }
 }
 
@@ -223,27 +221,129 @@ int avl_index_comparitor ( const void *avl_a, const void *avl_b, void *avl_param
     return a->address - b->address;
 }
 
-void test_btree() {
-    struct avl_table * table = avl_create( &avl_index_comparitor, NULL, &avl_allocator_default );
+KHASH_MAP_INIT_INT( uint32_t, uint32_t );
+void test_hash_table() {
+    khash_t(uint32_t) * table = kh_init(uint32_t);
 
-    dummy_t *a = malloc(sizeof(dummy_t));
-    for( int i=0; i<10; i++ ) {
-        a->address = (uint32_t) i;
-        avl_insert(table, a);
+    for( uint32_t i=0; i<1000; i++ ) {
+        int state;
+        khint_t k = kh_put( uint32_t, table, i, &state );
+        kh_value( table, k ) = i * 2;
     }
 
-    dummy_t query = { .address = 9 };
-    dummy_t * result = avl_find( table, &query );
+    for( uint32_t i=0; i<1000; i++ ) {
+        khint_t k = kh_get( uint32_t, table, i );
+        assert( k != kh_end(table), "Could not read from index in table, missing entries?" );
+        assert( kh_value( table, k ) == i*2, "Value mismatch in hash table" );
+    }
 
-    assert( result == a, "Result != a" );
+    khint_t hint = kh_get( uint32_t, table, 30 );
+    assert( kh_value( table, hint ) == 60, "Value lookup incorrect" );
 
+    kh_destroy( uint32_t, table );
+    table = kh_init(uint32_t);
+
+    assert( kh_size(table) == 0, "Table was not cleared after reset loop!" );
+
+    for( int i=0; i<1000; i++ ) {
+        int state;
+        khint_t k = kh_put( uint32_t, table, i, &state );
+        assert( kh_size( table ) == 1, "Non-one table size after insert" );
+        kh_value( table, k ) = (uint32_t)rand();
+        kh_del( uint32_t, table, k );
+        assert( kh_size( table ) == 0, "Non-zero table size after insert/remove cycle." );
+    }
+
+    kh_destroy( uint32_t, table );
+}
+
+void test_vector() {
+    kvec_t( uint32_t ) vector;
+    kv_init( vector );
+
+    for( uint32_t i=0; i<1000; i++ ) {
+        kv_push( uint32_t, vector, (i * 3) ^ 0xE5E5 );
+        assert( kv_A( vector, i ) == ((i*3) ^ 0xE5E5), "Incorrect read! Data mismatch!");
+    }
+
+    assert( kv_size( vector ) == 1000, "Vector length mismatch" );
+
+    for( uint32_t i=0; i<1000; i++ ) {
+        kv_pop( vector );
+    }
+
+    assert( kv_size( vector ) == 0, "Vector length mismatch" );
+    
+    kv_destroy( vector );
+}
+
+typedef struct {
+    uint32_t temp;
+    uint8_t * ptr;
+} test_t;
+
+KHASH_MAP_INIT_INT( int, test_t );
+void test_complex_structures() {
+    khash_t( int ) * table = kh_init( int );
+
+    int status;
+    khint_t hint = kh_put( int, table, 4, &status );
+    
+    test_t * value = &kh_value( table, hint );
+    assert( value != NULL, "Value from hashtable was null after a put operation!" );
+
+    value->temp = 10;
+    assert( value->temp == 10, "Direct write failed?" );
+
+    value->ptr = malloc( 10 );
+    assert( value->ptr != NULL, "Could not allocate 10 bytes for ptr test" );
+    memset( value->ptr, 5, 10 );
+    assert( value->ptr[2] == 5, "Memset values did not take!" );
+
+    assert( kh_size(table) == 1, "Invalid number of elements in the table" );
+
+    khint_t tmp = kh_get( int, table, 4 );
+    test_t * farRef = &kh_value( table, tmp );
+    assert( farRef != NULL, "Second lookup returned NULL" );
+
+    assert( farRef == value, "Second lookup was not the same pointer as the first!" );
+    assert( farRef->temp == value->temp, "Direct read/write values did not match!" );
+    assert( farRef->ptr == value->ptr, "Structure pointers did not match" );
+    assert( farRef->ptr[2] == 5, "Memset values in second lookup did not match set values" );
+
+    free( farRef->ptr );
+    farRef->ptr = NULL;
+
+    khint_t delhint = kh_get( int, table, 4 );
+    kh_del( int, table, delhint );
+
+    assert( !kh_exist( table, 4 ), "After deletion, bucket still held data!" );
+
+    assert( kh_size(table) == 0, "Table size was non-zero after delete" );
+
+    khint_t k;
+    for (k = kh_begin(table); k != kh_end(table); ++k) {
+        if (kh_exist(table, k)) {
+            int index = kh_key( table, k );
+			test_t * val = &kh_value(table, k);
+
+            printf( "%d -> %d, %p\n", index, val->temp, val->ptr );
+        }
+    }
+
+    //assert( kh_size(table) == 0, "Table with no keys has a non-zero size!" );
+
+    khint_t test = kh_get( int, table, 4 );
+    printf( ">>> %d\n", test );
+
+    kh_destroy( int, table );
 }
 
 int main(int argc, char ** argv ) {
     setReportAssert( false );
     setExitOnAssert( true );
 
-    log_setLevel( WARNING );
+    log_setLevel( INFO );
     log_info( "Just testing the log output - INFO" );
     log_warn( "Just testing the log output - WARNING" );
     log_error( "Just testing the log output - ERROR" );
@@ -251,14 +351,34 @@ int main(int argc, char ** argv ) {
     log_write( 3, "Log level 3" );
     log_write( 4, "Log level 4" );
 
-    //test_linear_buffer();
+    // Buffer Tests
+    log_info( "Running buffer tests..." );
+    log_info( "  Linear Buffer..." );
+    test_linear_buffer();
 
-    //test_ring_buffer();
-    //test_btree();
+    log_info( "  Ring Buffer..." );
+    test_ring_buffer();
 
-    //test_network_sync();
+    // Internals Tests
+    log_info( "Testing Network Functions..." );
+    test_network_sync();
 
-    //test_utility_functions();
+    log_info( "Testing Utility Functions..." );
+    test_utility_functions();
+
+    // KLIB Tests
+    log_info( "Running klib tests..." );
+
+    log_info( "  Hash Table..." );
+    test_hash_table();
+
+    log_info( "  Vector..." );
+    test_vector();
+
+    log_info( "  Table with Complex Structures..." );
+    test_complex_structures();
+
+    log_info( "\nAll tests complete successfully.\n" );
 
     return EXIT_SUCCESS;
 }

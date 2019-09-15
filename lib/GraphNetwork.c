@@ -31,6 +31,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include "Assert.h"
 
 volatile gnw_stats_t link_stats;
 
@@ -42,9 +43,9 @@ volatile gnw_stats_t link_stats;
  * @param buffer The buffer to write in to
  * @param address The 64-bit address to write
  */
-void gnw_format_address( char * buffer, uint64_t address ) {
+void gnw_format_address( char * buffer, gnw_address_t address ) {
     uint8_t * tmp = (uint8_t *) &address;
-    for( int i=7; i>-1; i-- ) {
+    for( int i=sizeof(gnw_address_t)-1; i>-1; i-- ) {
         buffer = buffer + sprintf( buffer, "%02x", *(tmp+i) );
         if( i > 0 )
             buffer = buffer + sprintf( buffer, ":" );
@@ -72,27 +73,39 @@ void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length ) {
     if( length == -1 )
         length = header.length + sizeof(gnw_header_t);
 
-    unsigned char * payload = buffer + sizeof( gnw_header_t );
+    unsigned char * payload = ptr;
     ssize_t payload_length = length - sizeof( gnw_header_t );
 
-    fprintf( fd, "Has correct magic? %s\n", ( header.magic == GNW_MAGIC ? "Yes" : "No" ) );
-    fprintf( fd, "Version:\t%x\n", header.version );
-    fprintf( fd, "Type:\t%x\t(", header.type );
-    switch( header.type ) {
-        case GNW_COMMAND: fprintf( fd, "COMMAND" ); break;
-        case GNW_DATA:    fprintf( fd, "DATA" );    break;
-        case GNW_INVALID: fprintf( fd, "INVALID" ); break;
-        default:
-            fprintf( fd, "???" );
-    }
-    fprintf( fd, ")\n" );
-    fprintf( fd, "Length:\t%dB\n", header.length );
+    fprintf( fd, "Packet<magic=%s, ", ( header.magic == GNW_MAGIC ? "ok" : "BAD" ) );
+    fprintf( fd, "version=%d, ", header.version );
 
+    char addressBuf[32] = { 0 };
+    gnw_format_address( addressBuf, header.source );
+    fprintf( fd, "source=%s, ", addressBuf );
+
+    fprintf( fd, "type=" );
+    switch( header.type ) {
+        case GNW_COMMAND: fprintf( fd, "COMMAND, " ); break;
+        case GNW_DATA:    fprintf( fd, "DATA, " );    break;
+        case GNW_INVALID: fprintf( fd, "INVALID, " ); break;
+        default:
+            fprintf( fd, "%2x, ", header.type );
+    }
+    fprintf( fd, "length=%d> ", header.length );
+
+    bool etc = false;
+    if( payload_length > 32 ) {
+        payload_length = 32;
+        etc = true;
+    }
+
+    fprintf( fd, "[ " );
     for( int i=0; i<payload_length; i++ ) {
         fprintf( fd, "%02x ", *(payload+i) );
-        if( i % 8 == 0 && i != 0 )
-            fprintf( fd, "\n" );
     }
+    if( etc )
+        fprintf( fd, "... etc " );
+    fprintf( fd, "]\n" );
 }
 
 void gnw_emitPacket( int fd, unsigned char * buffer, size_t length ) {
@@ -101,7 +114,6 @@ void gnw_emitPacket( int fd, unsigned char * buffer, size_t length ) {
 }
 
 void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, ssize_t length ) {
-    log_debug( "Data Packet" );
     link_stats.dataPackets++;
 
     uint8_t * packet = (uint8_t *)malloc( length + 11 );
@@ -128,7 +140,6 @@ void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, s
          the rule that we're never address zero, have it reserved for the negotiating phase only...? */
 __attribute__((deprecated))
 void gnw_emitCommandPacket( int fd, uint8_t type, unsigned char * buffer, ssize_t length ) {
-    log_debug( "Command Packet" );
     link_stats.commandPackets++;
 
     uint8_t * packet = (uint8_t *)malloc( length + 11 );
@@ -169,10 +180,6 @@ void gnw_request_connect( int fd, gnw_address_t _source, gnw_address_t _target )
     gnw_emitCommandPacket( fd, GNW_COMMAND, cbuffer, 9 );
 }
 
-
-#define GNW_PARSE_SYNC   0
-#define GNW_PARSE_BUFFER 1
-
 ssize_t gnw_nextPacket( uint8_t * buffer, size_t buffer_length ) {
 
     // Is there enough data for a whole valid packet?
@@ -181,17 +188,6 @@ ssize_t gnw_nextPacket( uint8_t * buffer, size_t buffer_length ) {
 
     // Reject a parse if there is no magic byte up front.
     if( buffer[0] != GNW_MAGIC ) {
-
-        // Debug: print the first few bytes of the buffer.
-        printf( "Buffer = [" );
-        for(int i=0; i<128; i++) {
-            if( i == buffer_length )
-                printf( "%02x$", buffer[i] );
-            else
-                printf( "%02x ", buffer[i] );
-        }
-        printf( "]\n" );
-
         return -1;
     }
     
@@ -215,4 +211,18 @@ ssize_t gnw_nextPacket( uint8_t * buffer, size_t buffer_length ) {
         return 11 + header.length;
     
     return 0;
+}
+
+uint8_t * gnw_parse_header( uint8_t * buffer, gnw_header_t * header ) {
+    uint8_t * ptr = buffer;
+    ptr = packet_read_u8( ptr, &header->magic );
+    ptr = packet_read_u8( ptr, &header->version );
+    ptr = packet_read_u8( ptr, &header->type );
+    ptr = packet_read_u32( ptr, &header->source );
+    ptr = packet_read_u32( ptr, &header->length );
+
+    assert( header->magic == GNW_MAGIC, "Bad header magic, bad buffer?" );
+    assert( header->version == GNW_VERSION, "Bad header version, mismatched router/clients?" );
+
+    return ptr;
 }
