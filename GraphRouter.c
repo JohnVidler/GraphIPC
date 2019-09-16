@@ -66,6 +66,7 @@ typedef struct {
  */
 typedef struct {
     kvec_t( gnw_address_t ) forward;
+    int bound_fd;
 
     int state;
     uint64_t packets_in;
@@ -242,14 +243,17 @@ void reset_context( context_t * context ) {
     context->packets_out = 0;
     context->bytes_in = 0;
     context->bytes_out = 0;
-    context->state = -1;
 
-    kv_destroy( context->forward );
+    if( context->state != -1 )
+        kv_destroy( context->forward );
+
+    context->state = 0;
 }
 
 void setup_context( context_t * context ) {
     reset_context( context );
     kv_init( context->forward );
+    context->state = 0;
 }
 
 void handle_packet( int fd, uint8_t * buffer, size_t length ) {
@@ -284,7 +288,13 @@ void handle_packet( int fd, uint8_t * buffer, size_t length ) {
                     int status;
                     khint_t hint = kh_put( gnw_address_t, address_table, address_req, &status );
                     context_t * context = &kh_value( address_table, hint );
+
+                    assert( context != NULL, "Null context!" );
+
+                    memset( context, 0, sizeof(context_t) );
                     setup_context( context );
+
+                    context->bound_fd = fd; // Bind this fd to this address (or visa-versa)
 
                     // Reply to the client with their assigned address
                     uint8_t reply[5] = { 0 };
@@ -301,9 +311,43 @@ void handle_packet( int fd, uint8_t * buffer, size_t length ) {
 
             break;
 
-        case GNW_DATA:
-            gnw_dumpPacket( stdout, buffer, length );
-            break;
+        case GNW_DATA: {
+            khint_t hint = kh_get( gnw_address_t, address_table, header.source );
+
+            // Just drop the message, if we don't have a known, bound address for this...
+            if( !kh_exist( address_table, hint ) ) {
+                log_debug( "Dropped %lu bytes.", length );
+                return;
+            }
+
+            // Grab this entry
+            context_t * entry = &kh_value( address_table, hint );
+
+            // Update the stats
+            entry->bytes_in += length;
+            entry->packets_in ++;
+
+            // TEST BROADCAST MODE ONLY
+            // ToDo: This should look up the routing mode, then forward according to the policy to anything
+            //       in the entry->forward vector.
+            //       Kludge for now...
+
+            khint_t fwd = kh_get( gnw_address_t, address_table, 0x1000 );
+            if( !kh_exist( address_table, fwd ) ) {
+                // ToDo: Should delete any missing destinations!
+                return;
+            }
+
+            context_t * fwdEntry = &kh_value( address_table, fwd );
+
+            assert( fwdEntry != NULL, "Null forwarding entry!" );
+
+            gnw_emitPacket( fwdEntry->bound_fd, buffer, length ); // Forward wholesale
+
+            fwdEntry->bytes_out += length;
+            fwdEntry->packets_out ++;
+        }
+        break;
 
         default:
             log_warn( "Unknown header type %02x, ignored, may be build mismatch?", header.type );
@@ -341,10 +385,6 @@ void handle_event( int index, struct pollfd * pollStruct, uint8_t * buffer, ssiz
     // Try and get the local buffer reference
     khint_t iter = kh_get( int, local_buffer, pollStruct->fd );
 
-    printf( "Iter = %d\n", iter );
-
-    kh_exist( local_buffer, iter );
-
     // If it's not there, make one!
     if( iter == kh_end( local_buffer ) ) {
         printf( "Creating new buffer space...\n" );
@@ -364,31 +404,6 @@ void handle_event( int index, struct pollfd * pollStruct, uint8_t * buffer, ssiz
         assert( newBuffer->buffer == newBuffer->buffer_tail, "Tail/Buffer mismatch after malloc" );
     }
 
-    printf( "Iter = %d\n", iter );
-    printf( "Ptr = %p\n", kh_value(local_buffer, iter) );
-
-    printf( "Local Buffers (%d):\n", kh_size( local_buffer ) );
-    iter = kh_begin( local_buffer );
-    while( iter != kh_end( local_buffer ) ) {
-        int fd = kh_key( local_buffer, iter );
-        local_buffer_t * buffer = &kh_value( local_buffer, iter );
-
-        // Only bother rendering stuff with actual buffers!
-        if( &kh_value( local_buffer, iter ) != NULL ) {
-            if( kh_value( local_buffer, iter ).buffer == NULL ) {
-                printf( "\t|->\tfd=%d, length=0, (*NULL)\n", fd );
-            }
-            else {
-                ssize_t length = (buffer->buffer_tail - buffer->buffer);
-
-                printf( "\t|->\tfd=%d, length=%ld\n", fd, length );
-            }
-        }
-
-        iter++;
-    }
-    printf( "\n" );
-
     // Update iter and pull the buffer reference
     iter = kh_get( int, local_buffer, pollStruct->fd );
     local_buffer_t * local = &kh_value( local_buffer, iter );
@@ -403,6 +418,8 @@ void handle_event( int index, struct pollfd * pollStruct, uint8_t * buffer, ssiz
     local->buffer_tail += length;
     buffer_size += length;
 
+    //printf( "Cached: %lu B\n", buffer_size );
+
     // Attempt to find a packet frame, then pass it on...
     ssize_t ready_bytes = 0;
     while( (ready_bytes = gnw_nextPacket( local->buffer, buffer_size )) < 0 ) {
@@ -411,9 +428,10 @@ void handle_event( int index, struct pollfd * pollStruct, uint8_t * buffer, ssiz
         buffer_size--;
     }
 
+    //printf( "Bytes: %ld\n", ready_bytes );
+
     // After that, is there any buffer left?
     if( ready_bytes > 0 ) {
-        log_debug( "Packet" );
         // Isolate, copy and forward
         uint8_t packet[config.network_mtu];
         packet_shift( local->buffer, buffer_size, packet, ready_bytes );

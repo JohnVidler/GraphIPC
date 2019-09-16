@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include <wait.h>
 #include <assert.h>
+#include <arpa/inet.h>
 
 #define LOG_NAME "GraphWrap"
 

@@ -187,9 +187,8 @@ ssize_t gnw_nextPacket( uint8_t * buffer, size_t buffer_length ) {
         return 0;
 
     // Reject a parse if there is no magic byte up front.
-    if( buffer[0] != GNW_MAGIC ) {
+    if( buffer[0] != GNW_MAGIC )
         return -1;
-    }
     
     // Actually parse stuff
     gnw_header_t header = { 0 };

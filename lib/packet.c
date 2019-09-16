@@ -14,6 +14,7 @@ uint8_t * packet_write_u8( uint8_t * buffer, uint8_t data )
 
 uint8_t * packet_write_u16( uint8_t * buffer, uint16_t data )
 {
+    data = htons( data );
     *buffer++ = (data >> 8) & 0xFF;
     *buffer++ = data & 0xFF;
     return buffer;
@@ -21,12 +22,13 @@ uint8_t * packet_write_u16( uint8_t * buffer, uint16_t data )
 
 uint8_t * packet_write_u32( uint8_t * buffer, uint32_t data )
 {
-    *buffer++ = (data >> 24) & 0xFF;
-    *buffer++ = (data >> 16) & 0xFF;
-    *buffer++ = (data >> 8) & 0xFF;
-    *buffer++ = data & 0xFF;
-    
-    return buffer;
+    data = htonl( data );
+    buffer[0] = (data >> 24u) & 0xFFu;
+    buffer[1] = (data >> 16u) & 0xFFu;
+    buffer[2] = (data >>  8u) & 0xFFu;
+    buffer[3] = (data >>  0u) & 0xFFu;
+
+    return buffer+4;
 }
 
 uint8_t * packet_read_u8( uint8_t * buffer, uint8_t * data )
@@ -44,6 +46,8 @@ uint8_t * packet_read_u16( uint8_t * buffer, uint16_t * data )
 {
     *data = (*buffer << 8) | *(buffer+1);
 
+    *data = ntohs( *data );
+
 #ifdef DEBUG
     printf( "{%4x}", *data );
 #endif
@@ -53,7 +57,13 @@ uint8_t * packet_read_u16( uint8_t * buffer, uint16_t * data )
 
 uint8_t * packet_read_u32( uint8_t * buffer, uint32_t * data )
 {
-    *data = (*(buffer+3) << 24) | (*(buffer+2) << 16) | (*(buffer+1) << 8) | *(buffer);
+    *data = 0;
+    *data |= (uint32_t)(buffer[0]) << 24u;
+    *data |= (uint32_t)(buffer[1]) << 16u;
+    *data |= (uint32_t)(buffer[2]) <<  8u;
+    *data |= (uint32_t)(buffer[3]) <<  0u;
+
+    *data = ntohl( *data );
 
 #ifdef DEBUG
     printf( "{%8x}", *data );
@@ -61,6 +71,7 @@ uint8_t * packet_read_u32( uint8_t * buffer, uint32_t * data )
 
     return buffer+4;
 }
+
 
 uint8_t * packet_write_u8_buffer( uint8_t * buffer, uint8_t * data, size_t length ) {
 #ifdef DEBUG
