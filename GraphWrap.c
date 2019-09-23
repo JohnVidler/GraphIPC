@@ -21,20 +21,20 @@
 #include "lib/LinkedList.h"
 #include "lib/packet.h"
 #include "Log.h"
+#include "lib/Assert.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <inttypes.h>
 #include <poll.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <wait.h>
-#include <assert.h>
 #include <arpa/inet.h>
+#include "lib/klib/khash.h"
 
 #define LOG_NAME "GraphWrap"
 
@@ -46,11 +46,12 @@
 #define MAX_INPUT_STREAMS 256
 #define IGNORE_FD (-1)
 
-#define MUX_AUTO_SPAWN 0
+#define MUX_NOOP  0
 #define MUX_MERGE 1
 
-#define DEMUX_NOOP 0
-#define DEMUX_DROP 1
+#define DEMUX_NOOP       0
+#define DEMUX_SPAWN      1
+#define DEMUX_MERGE      2
 
 extern char **environ;
 
@@ -58,174 +59,172 @@ extern char **environ;
 struct _configuration {
     int            network_mtu;     // default = 1500
     unsigned int   read_timeout;    // default = 5
-    uint8_t     *  rx_buffer;
-    uint8_t     *  rx_buffer_tail;
-
-    unsigned char  arg_mux_policy;
-    unsigned char  arg_demux_policy;
 
     char *         arg_host;
     char *         arg_port;
     gnw_address_t  arg_address;
+    gnw_address_t  gnw_local_mask;
     bool           arg_immediate;
     unsigned int   arg_verbosity;
     bool           arg_echo;
     char           arg_delimiter;
 };
-struct _configuration config;
+
+struct _mux_config {
+    unsigned int mode;
+};
+
+struct _demux_config{
+    unsigned int mode;
+    uint32_t round_robin_index;
+};
 
 typedef struct {
-    pthread_t     thread_context;
-    gnw_address_t stream_address;
     int wrap_stdin[2];
     int wrap_stdout[2];
+
+    uint64_t packets_in;
+    uint64_t packets_out;
+
+    uint64_t bytes_in;
+    uint64_t bytes_out;
+
+    uint8_t * outputBuffer;
 
     char * binary;
     char ** binary_arguments;
 } sink_context_t;
 
-typedef struct {
-    sink_context_t ** forward;
-    uint8_t round_robin_index;
-    bool ignore_sub_stream;
-} mux_t;
-
-typedef struct {
-    sink_context_t ** collect;
-    bool ignore_sub_stream;
-} demux_t;
-
-sink_context_t * substream_table[MAX_INPUT_STREAMS] = { NULL };
+// Configuration structures, for namespace sanity
+struct _configuration config;
+struct _mux_config    config_mux;
+struct _demux_config  config_demux;
 
 // This can only ever grow, due to internal constraints, which is unfortunate...
 struct pollfd    stream_fd[MAX_INPUT_STREAMS];
-int stream_fd_count = 0;
 
-volatile unsigned char nextLocalAddress = 0;
+gnw_address_t nextLocalAddress = 0;
 
-linked_list_t * sink_context_list;
-pthread_mutex_t sink_context_list_mutex;
+// Hashtable of substreams for faster-ish lookups
+KHASH_MAP_INIT_INT( gnw_address_t, sink_context_t );
+khash_t(gnw_address_t) * sinkTable;
+
+// The 'big buffer in the sky' for the node as a whole
+typedef struct {
+    uint8_t * head;
+    uint8_t * tail;
+} local_buffer_t;
+
+KHASH_MAP_INIT_INT( int, local_buffer_t );
+khash_t(int) * input_buffer;
+
+local_buffer_t * getLocalBuffer( int fd ) {
+    khint_t hint = kh_get( int, input_buffer, fd );
+
+    // Does this key exist?
+    if( hint == kh_end(input_buffer) ) {
+        log_debug( "Auto-creating buffers for fd = %d\n", fd );
+
+        // Create a new buffer set!
+        int status;
+        hint = kh_put( int, input_buffer, fd, &status );
+        kh_value( input_buffer, hint ).head = (uint8_t *)malloc( config.network_mtu * 20 );
+        kh_value( input_buffer, hint ).tail = kh_value( input_buffer, fd ).head;
+    }
+
+    return &kh_value( input_buffer, hint );
+}
+
+void destroyLocalBuffer( int fd ) {
+    khint_t hint = kh_get( int, input_buffer, fd );
+
+    // Does this key exist?
+    if( hint == kh_end(input_buffer) )
+        return;
+    
+    log_debug( "Freeing local buffers for fd = %d\n", fd );
+    local_buffer_t * buffer = &kh_value( input_buffer, hint );
+    free( buffer->head );
+    buffer->head = NULL;
+    buffer->tail = NULL;
+}
+
+gnw_address_t applyMuxPolicy( gnw_address_t address ) {
+    switch( config_mux.mode ) {
+        // Do nothing
+        case MUX_NOOP:
+            return address;
+
+        // Rewrite addresses to the local node address
+        case MUX_MERGE:
+            return config.arg_address;
+        
+        default:
+            log_error( "BAD MUX MODE - Mux state corrupted!" );
+    }
+    return address;
+}
+
+gnw_address_t applyDeMuxPolicy( gnw_address_t address ) {
+
+    fprintf( stderr, "Policy = %d\n", config_demux.mode );
+
+    switch( config_demux.mode ) {
+
+        // Preserve the addresses and pass through.
+        case DEMUX_NOOP:
+            return address;
+
+        case DEMUX_SPAWN: {
+            // Try to find an existing address match 
+            khint_t hint = kh_get( gnw_address_t, sinkTable, address );
+
+            // If we have a non-end match, there must already be a sink for this. Do nothing.
+            if( hint != kh_end( sinkTable ) )
+                return address;
+            
+
+            
+            log_warn( "Unimplemented function DEMUX_SPAWN" );
+        } break;
+        
+        // Drop the local addresses and rewrite as the node address
+        case DEMUX_MERGE:
+            return config.arg_address;
+        
+        default:
+            log_error( "BAD DEMUX MODE - DeMux state corrupted!" );
+    }
+
+    log_error( "Fell though to default state! Could not apply DeMux policy" );
+    return 0xFFFFFFFF;
+}
 
 int router_fd = -1;
 int getRouterFD() {
     if( router_fd == -1 ) {
         log_info( "Connecting to router at %s:%s...", config.arg_host, config.arg_port );
         router_fd = socket_connect( config.arg_host, config.arg_port );
-
-        //printf( "Router FD = %d\n", router_fd );
-
-        // Build the other network-related structures
-        config.rx_buffer = (uint8_t *)malloc( config.network_mtu * 20 ); // 20 packet(ish) buffer
-        config.rx_buffer_tail = config.rx_buffer;
     }
     return router_fd;
 }
 
-gnw_address_t getNodeAddress( gnw_address_t try_address ) {
-    int router = getRouterFD();
+gnw_address_t getNextLocalAddress() {
+    nextLocalAddress = (nextLocalAddress+1) & config.gnw_local_mask;
 
-    gnw_address_t new_address = 0;
-
-    // Ask for an address
-    if( try_address == 0 ) {
-        log_info( "Requesting an address from the router..." );
-        gnw_sendCommand(router, GNW_CMD_NEW_ADDRESS);
-    }
-    else {
-        // Bit of a hack - send the requested address with the new address request... Might just be ignored at the router, though!
-        log_info( "Requesting address [%08x] from the router...", try_address );
-        unsigned char reqBuffer[sizeof(gnw_address_t)+1] = { GNW_CMD_NEW_ADDRESS, 0 };
-        memcpy( reqBuffer+1, &try_address, sizeof(gnw_address_t) );
-        gnw_emitCommandPacket( router, GNW_COMMAND, reqBuffer, sizeof(gnw_address_t) + 1 );
-    }
-
-    unsigned char iBuffer[config.network_mtu];
-    while( new_address == 0 ) {
-        ssize_t bytesRead = read( router, iBuffer, config.network_mtu );
-        if( bytesRead <= 0 ) {
-            log_error( "IO Error, halting! (1)" );
-            exit( EXIT_FAILURE ); // Hard exit here, as return fails to... well, fail. -John
-        }
-
-        config.rx_buffer_tail = packet_write_u8_buffer( config.rx_buffer_tail, iBuffer, bytesRead );
-
-        ssize_t readyBytes = 0;
-        while( (readyBytes = gnw_nextPacket( config.rx_buffer, config.rx_buffer_tail - config.rx_buffer )) != 0 ) {
-
-            // Are we in some invalid buffer state?
-            if( readyBytes < 0 ) {
-                log_warn( "Network desync, attempting to resync... (Err = %d)", readyBytes );
-                // Dump a byte, try to clear the buffer and re-try.
-                packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, 1 );
-                config.rx_buffer_tail--;
-                continue;
-            }
-
-            gnw_header_t header = { 0 };
-            
-            uint8_t * ptr = gnw_parse_header( config.rx_buffer, &header );
-
-            gnw_dumpPacket( stdout, config.rx_buffer, readyBytes ); // DEBUG
-
-            uint8_t payload[config.network_mtu];
-            memcpy( payload, ptr, header.length );
-
-            packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, 11 + header.length );
-            config.rx_buffer_tail -= 11 + header.length;
-
-            if( header.version != GNW_VERSION )
-                log_warn( "Warning! Router/Client version mismatch!" );
-
-            switch( header.type ) {
-                case GNW_REPLY:
-                case GNW_COMMAND: { // Command response
-                    uint8_t directive = 0xff;
-                    uint8_t * next = packet_read_u8( payload, &directive );
-
-                    //printf( "{CMD/RPLY}\n" );
-                    if( header.length < 1 ) {
-                        log_warn( "Router sent a command with no operator, no idea what to do! Trying to skip past it..." );
-                        break;
-                    }
-
-                    switch( directive ) {
-                        case GNW_CMD_NEW_ADDRESS:
-                            printf( "{New Address}\n" );
-
-                            next = packet_read_u32( next, &new_address );
-
-                            if( new_address != try_address && try_address != 0 )
-                                log_warn( "Router refused our address request for %08x, actually got %08x", try_address, new_address );
-
-                            break;
-
-                        default:
-                            log_warn( "Unknown command response? (%u)", (unsigned char)(*payload) );
-                            break;
-                    }
-                }
-                break;
-
-                case GNW_DATA:
-                    if( header.length == 0 )
-                        log_warn("Router keepalive received (lossy connection?)");
-                    break;
-
-                default:
-                    log_warn( "Unknown response from router, skipping. (%x)", header.type );
-            }
-        }
-    }
-
-    log_info( "Address is now [%08x]", new_address );
-
-    return new_address;
+    // Claim this address for our FD on the router
+    log_info( "Requesting address [%08x] from the router...", nextLocalAddress );
+    unsigned char reqBuffer[5] = { 0 };
+    uint8_t * ptr = packet_write_u8( reqBuffer, GNW_CMD_NEW_ADDRESS );
+    ptr = packet_write_u32( ptr, nextLocalAddress );
+    gnw_emitCommandPacket( getRouterFD(), GNW_COMMAND, reqBuffer, 5 );
+    
+    return nextLocalAddress;
 }
 
 int dropRouterFD() {
     if( router_fd != -1 ) {
         log_info( "Disconnecting from router..." );
-        free( config.rx_buffer );
         close( router_fd );
     }
     return -1;
@@ -238,16 +237,8 @@ int addNewWatch( int fd ) {
     }
     stream_fd[index].fd = fd;
     stream_fd[index].events = POLLIN;
-
-    stream_fd_count++;
-
+    
     return index;
-}
-
-void configure_stdin_input() {
-    int watchIndex = addNewWatch( STDIN_FILENO ); // Add STDIN to the input watch list
-
-    log_info( "Now watching for input from STDIN on %d\n", watchIndex );
 }
 
 /**
@@ -278,159 +269,8 @@ int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** ar
     return -1;
 }
 
-void * sink_thread( void * _context ) {
-    sink_context_t * context = (sink_context_t *)_context;
-
-    // 2x MTU, so we always have room for one entire transmission
-    uint8_t outputBuffer[ config.network_mtu * 2 ];
-    memset( outputBuffer, 0, config.network_mtu * 2 );
-    uint8_t * outputTail = outputBuffer;
-
-    log_debug( "Sink started!" );
-
-    // Become two actual processes, launch the child.
-    pid_t childPID = fork();
-    if( childPID == 0 ) {
-        processRunner(PIPE_READ(context->wrap_stdin), PIPE_WRITE(context->wrap_stdout), context->binary, context->binary_arguments);
-        return NULL; // Should never happen...
-    }
-
-    log_debug( "CHILD PID:\t%d", childPID );
-
-    struct pollfd watch_fd[1];
-    memset( watch_fd, 0, sizeof( struct pollfd ) * 2 );
-
-    watch_fd[0].fd = PIPE_READ(context->wrap_stdout);
-    watch_fd[0].events = POLLIN;
-
-    int rfd = getRouterFD(); // Note: we don't need to close this, the host binary will do this for us!
-    context->stream_address = getNodeAddress( 0 );
-
-    int status = 0;
-    while( status == 0 ) {
-        int rv = poll( watch_fd, 1, config.read_timeout * 1000 );
-
-        if( rv == -1 ) {        // Error state while poll'ing
-            log_error( "Error during poll cycle for input. Shutting down." );
-            break;
-        } else if( rv == 0 ) {  // Timed out on poll wait
-
-            // Has the wrapped process exited/died?
-            int status = 0;
-            int ret = waitpid( childPID, &status, WNOHANG );
-            if( ret == -1 && WIFEXITED(status) ) {
-                log_error( "Process terminated (exit code = %d)", WEXITSTATUS(status));
-                status = 1;
-                break;
-            }
-        } else {  // Data ready from the process itself.
-
-            // Handle any events on the process output
-            if( watch_fd[0].revents != 0 ) {
-                if ((watch_fd[0].revents & POLLIN) == POLLIN) {
-                    uint8_t buffer[config.network_mtu];
-
-                    ssize_t bytesRead = read(watch_fd[0].fd, buffer, config.network_mtu);
-
-                    if( config.arg_verbosity > 0 )
-                        fprintf( stderr, ">>>\t%s\n", buffer );
-
-                    if( bytesRead > 0 ) {
-                        // Do we have a delim at any point in this new block?
-                        for( size_t offset=0; offset<bytesRead; offset++ ) {
-                            outputTail = packet_write_u8( outputTail, buffer[offset] );
-
-                            if( buffer[offset] == config.arg_delimiter ) {
-                                uint8_t txBuffer[ outputTail-outputBuffer ];
-                                size_t txLength = outputTail-outputBuffer;
-                                outputTail = packet_shift( outputBuffer, config.network_mtu * 2, txBuffer, txLength );
-                                gnw_emitDataPacket( rfd, context->stream_address, txBuffer, txLength ); // Always emit from the node source address, not the stream source address
-                            }
-                        }
-                    }
-                }
-            }
-
-            watch_fd[0].revents = 0;
-        }
-    }
-
-    log_warn( "Sink died - no way to handle this right now!" );
-    pthread_exit(0); // Just stop
-}
-
-/**
- * Tries to find a sink context based on the source address.
- *
- * This is slightly magic in one particular case - if the application is in 'immediate mode' it doesn't know what the
- * source address of the first stream is before it <strong>must</strong> run the inner binary, so it creates a context
- * where the stream address is zero - ie. the invalid stream, then when the first message from <strong>any</strong>
- * stream comes in, this function grabs the context with a zero stream address, fixes the address, then passes it back
- * to the caller, now as a completely valid context.
- *
- * This might be useful later for stream re-use, if there is a sensible way to handle disconnects, which at the time
- * of writing (version 1.0.0, as it were) disconnections are silent for the sink endpoints.
- *
- * Messy, but it seems to be the most sane way to handle this odd edge case for now. -John.
- *
- * @param needle The address to find a context for
- * @return The matching sink_context_t pointer, or NULL if no context matches
- */
-sink_context_t * getSinkContext( gnw_address_t needle ) {
-    pthread_mutex_lock( &sink_context_list_mutex );
-
-    struct list_element * iter = sink_context_list->head;
-    while( iter != NULL ) {
-        if( ((sink_context_t *)iter->data)->stream_address == needle || ((sink_context_t *)iter->data)->stream_address == 0 ) {
-
-            // If we have a context with no valid stream address, fix that, and use it as this one.
-            if( ((sink_context_t *)iter->data)->stream_address == 0 )
-                ((sink_context_t *)iter->data)->stream_address = needle;
-
-            pthread_mutex_unlock( &sink_context_list_mutex ); // Note: This might be thread-unsafe... not sure. -John
-            return iter->data;
-        }
-        iter = iter->next;
-    }
-
-    pthread_mutex_unlock( &sink_context_list_mutex );
-    return NULL;
-}
-
-sink_context_t * createNewSink( char * binary, char ** arguments, gnw_address_t source ) {
-    sink_context_t * sink_context = malloc( sizeof(sink_context_t) );
-    sink_context->stream_address   = source;
-    sink_context->binary           = binary;
-    sink_context->binary_arguments = arguments;
-
-    // Build a new set of redirected pipes
-    if( pipe( sink_context->wrap_stdin ) == -1 ) {
-        log_error( "Could not create wrapper for stdin");
-        exit( EXIT_FAILURE );
-    }
-
-    if( pipe( sink_context->wrap_stdout ) == -1 ) {
-        log_error( "Could not create wrapper for stdout");
-        exit( EXIT_FAILURE );
-    }
-
-    // Spin up a new instance!
-    int result = pthread_create( &(sink_context->thread_context), NULL, sink_thread, sink_context );
-    if( result != 0 ) {
-        log_error( "Could not start up a new sink thread. Cannot continue.");
-        exit( EXIT_FAILURE );
-    }
-    pthread_detach( sink_context->thread_context );
-
-    // Add it in to the list
-    pthread_mutex_lock( &sink_context_list_mutex );
-    ll_append( sink_context_list, sink_context );
-    pthread_mutex_unlock( &sink_context_list_mutex );
-
-    return sink_context;
-}
-
-void handlePacket( int index, gnw_header_t * header, unsigned char * payload ) {
+void handleDataPacket( gnw_header_t * header, uint8_t * payload ) {
+    // Node: IN -> DEMUX -> PROCESS -> MUX -> OUT
 
     // Are we in 'output mode' (or otherwise echo'ing)?
     if( config.arg_echo ) {
@@ -442,36 +282,169 @@ void handlePacket( int index, gnw_header_t * header, unsigned char * payload ) {
         return;
     }
 
-    // Virtual MUX Operation
-    switch( config.arg_mux_policy ) {
-        case MUX_AUTO_SPAWN: /* No-op */ break;
-        case MUX_MERGE:
-            header->source = config.arg_address;
-            break;
-        default:
-            log_error( "Bad internal mux policy! [%x]", config.arg_mux_policy );
-    }
+    // Mangle the source address if we're configured to do so.
+    header->source = applyDeMuxPolicy( header->source );
 
-    sink_context_t * context = getSinkContext( header->source );
-    if( context == NULL ) {
-
-        if( config.arg_mux_policy == MUX_AUTO_SPAWN ) {
-            log_warn( "Unimplemented mux spawn stage!" );
-            //
-        }
-
-        log_warn( "No sink creation policy, and no such address [%x], so dropping the packet!", header->source );
-        log_warn( "Data has been lost" );
+    // Look up whoever this is.
+    khint_t hint = kh_get( gnw_address_t, sinkTable, header->source );
+    if( hint == kh_end( sinkTable ) ) {
+        // Note: Should actually spawn stuff here
+        log_error( "No such address %08x, but the router seems to think we are it? Dropped packet.", header->source );
         return;
     }
 
-    FILE * file = fdopen( PIPE_WRITE(context->wrap_stdin), "w" );
+    // At this point, we'd expect that the hint points to actual data.
+    sink_context_t * context = &kh_value( sinkTable, hint );
+    write( PIPE_WRITE(context->wrap_stdin), payload, header->length );
+
+    // Update the stats!
+    context->packets_in++;
+    context->bytes_in += header->length;
+}
+
+void handleCommandPacket( gnw_header_t * header, uint8_t * payload ) {
+    // All command packets are handled as the node address, irrespective of the source
+    // address in the header.
+
+    uint8_t directive = 0xff;
+    uint8_t * next = packet_read_u8( payload, &directive );
+
+    if( header->length < 1 ) {
+        log_warn( "Router sent a command with no operator, no idea what to do! Trying to skip past it..." );
+        return;
+    }
+
+    switch( directive ) {
+        case GNW_CMD_NEW_ADDRESS:
+            next = packet_read_u32( next, &config.arg_address );
+            log_info( "Router issued us address: %08x", config.arg_address );
+            break;
+
+        default:
+            log_warn( "Unknown command response? (%u)", (unsigned char)(*payload) );
+            break;
+    }
+}
+
+void handlePacket( gnw_header_t * header, uint8_t * payload ) {
+    uint8_t * ptr = payload;
+
+    switch( header->type ) {
+
+        // Data stuff
+        case GNW_DATA: handleDataPacket( header, payload ); break;
+        
+        // Command stuff
+        case GNW_COMMAND:
+        case GNW_REPLY:
+            handleCommandPacket( header, payload );
+            break;
+        
+        default:
+            log_error( "BAD PACKET TYPE (%u) - Unknown packet type! Line corruption or version mismatch?", header->type );
+    }
+
+    /*FILE * file = fdopen( PIPE_WRITE(context->wrap_stdin), "w" );
     size_t written = fwrite( payload, sizeof(unsigned char), header->length, file );
     if( written != header->length ) {
         log_warn( "Could not write buffered data to the child process, OS buffer overflow?" );
         log_warn( "Data has been lost" );
     }
-    fflush( file );
+    fflush( file );*/
+}
+
+void handleRemoteData( int * fd, int * shutdown ) {
+    local_buffer_t * buffer = getLocalBuffer( *fd );
+
+    size_t capacity = (config.network_mtu * 20) - (buffer->tail - buffer->head);
+    ssize_t actualRead = read( *fd, buffer->tail, capacity );
+
+    // Did the read fail?
+    if( actualRead < 1 ) {
+        log_warn( "Stream closed unexpectedly" );
+
+        if( *fd == getRouterFD() ) {
+            log_error( "Router closed our connection! Also closing down..." );
+            *shutdown = 1; // Mark us for shutdown.
+        }
+
+        destroyLocalBuffer( *fd );
+        *fd = -1; // Clear the FD reference so poll doesn't use it later
+
+        return;
+    }
+
+    // Otherwise, the read should have worked, update the tail pointer
+    assert( actualRead > 0, "Read worked but total bytes was negaive! This should never happen!" );
+    buffer->tail += actualRead;
+    
+    // While we have data on the buffer, try and parse it!
+    ssize_t readyBytes = 0;
+    while( (readyBytes = gnw_nextPacket( buffer->head, buffer->tail - buffer->head )) != 0 ) {
+        // Are we in some invalid buffer state?
+        if( readyBytes < 0 ) {
+            log_warn( "Network desync, attempting to resync... (Err = %d)", readyBytes );
+            // Dump a byte, try to clear the buffer and re-try.
+            packet_shift( buffer->head, config.network_mtu * 20, NULL, 1 );
+            buffer->tail--;
+            continue;
+        }
+
+        gnw_header_t header = { 0 };
+        uint8_t * ptr = gnw_parse_header( buffer->head, &header );
+
+        /*fprintf( stderr, "PKT>>>" );
+        gnw_dumpPacket( stderr, buffer->head, readyBytes ); // DEBUG*/
+
+        // Safety buffer, so we can't accidentally trash the main one
+        uint8_t payload[11 + header.length];
+        memcpy( payload, ptr, header.length );
+
+        // Shift (read) out, and update the pointers.
+        packet_shift( buffer->head, config.network_mtu * 20, NULL, 11 + header.length );
+        buffer->tail -= 11 + header.length;
+
+        // Pass on to the packet handler
+        handlePacket( &header, payload );
+    }
+}
+
+void handleLocalData( int * fd, int * shutdown ) {
+    local_buffer_t * buffer = getLocalBuffer( *fd );
+
+    size_t capacity = (config.network_mtu * 20) - (buffer->tail - buffer->head);
+    ssize_t actualRead = read( *fd, buffer->tail, capacity );
+
+    // Did the read fail?
+    if( actualRead < 1 ) {
+        log_warn( "Stream closed unexpectedly" );
+
+        if( *fd == STDIN_FILENO ) {
+            // Stdin closed, pipe must have gone, OK, shut stuff down.
+            log_error( "STDIN went offline, pipe must have died. Closing down in turn..." );
+            *shutdown = 1;
+        }
+
+        destroyLocalBuffer( *fd );
+        *fd = -1; // Clear the FD reference so poll doesn't use it later
+
+        return;
+    }
+
+    buffer->tail += actualRead;
+    size_t remainingCapacity = (config.network_mtu * 20) - (buffer->tail - buffer->head);
+
+    uint8_t * cursor = buffer->head;
+    while( cursor < buffer->tail ) {
+        if( *cursor == config.arg_delimiter ) {
+            gnw_emitDataPacket( router_fd, config.arg_address, buffer->head, cursor - buffer->head );
+            assert( cursor - buffer->head <= config.network_mtu * 20, "Cursor blew off the end of the local buffer!" );
+            packet_shift( buffer->head, config.network_mtu * 20, NULL, cursor - buffer->head );
+            buffer->tail -= cursor - buffer->head;
+            cursor = buffer->head;
+        }
+        cursor++;
+    }
 }
 
 typedef struct {
@@ -491,6 +464,8 @@ typedef struct {
 #define ARG_IMMEDIATE  9
 #define ARG_VERSION    10
 #define ARG_DELIMITER  11
+#define ARG_LOCALMASK  12
+#define ARG_QUIET      13
 
 int main(int argc, char ** argv ) {
     // Initial states
@@ -505,8 +480,7 @@ int main(int argc, char ** argv ) {
     config.arg_host = "127.0.0.1";
     config.arg_port = (char *) ROUTER_PORT;
 
-    config.arg_mux_policy   = MUX_AUTO_SPAWN;
-    config.arg_demux_policy = DEMUX_NOOP;
+    config.gnw_local_mask   = 0x00000FFF; // Bottom 3 octets for local addressing. Bit overkill, but hey.
 
     config.arg_address   = 0;
     config.arg_immediate = false;
@@ -514,15 +488,16 @@ int main(int argc, char ** argv ) {
 
     config.arg_echo = false;
 
-    config.arg_delimiter = '\0';
+    config.arg_delimiter = '\n';
 
     // Check the system MTU and match it - this assumes local operation, for now.
     // Note: Possibly add an override for this in the flags...
     config.network_mtu = getIFaceMTU("lo");
 
-    // Build any remaining structures
-    sink_context_list = ll_create();
-    pthread_mutex_init( &sink_context_list_mutex, NULL );
+    // Configure local structures...
+    sinkTable = kh_init( gnw_address_t );
+    input_buffer = kh_init( int );
+
 
     // Following pragma block is just to prevent gcc complaining about mismatched braces in this structure
     // apparently, this is a compiler bug! (gcc v7.3.1)
@@ -536,8 +511,8 @@ int main(int argc, char ** argv ) {
             [ARG_ADDRESS]    = { .name="address",   .has_arg=required_argument, .flag=NULL },
             [ARG_INPUT]      = { .name="input",     .has_arg=no_argument,       .flag=NULL },
             [ARG_OUTPUT]     = { .name="output",    .has_arg=no_argument,       .flag=NULL },
-            [ARG_MUX]        = { .name="output",    .has_arg=no_argument,       .flag=NULL },
-            [ARG_DEMUX]      = { .name="output",    .has_arg=no_argument,       .flag=NULL },
+            [ARG_MUX]        = { .name="mux",       .has_arg=required_argument, .flag=NULL },
+            [ARG_DEMUX]      = { .name="demux",     .has_arg=required_argument, .flag=NULL },
             [ARG_IMMEDIATE]  = { .name="immediate", .has_arg=no_argument,       .flag=NULL },
             [ARG_VERSION]    = { .name="version",   .has_arg=no_argument,       .flag=NULL },
             [ARG_DELIMITER]  = { .name="delim",     .has_arg=required_argument, .flag=NULL },
@@ -553,9 +528,11 @@ int main(int argc, char ** argv ) {
         [ARG_ADDRESS]   = { .arg="a",  .description="The (requested) hexadecimal node address, may not be respected by the router. Cannot be 0." },
         [ARG_INPUT]     = { .arg="i",  .description="Run in input bridge mode; take and input on stdin and forward to the GraphRouter." },
         [ARG_OUTPUT]    = { .arg="o",  .description="Rung in output bridge mode; take any messages from the GraphRouter and emit them on stdout." },
+        [ARG_MUX]       = { .arg=NULL, .description="Configure the output multiplexer policy, determines how addresses are handled from sub-process streams [noop|merge]" },
+        [ARG_DEMUX]     = { .arg=NULL, .description="Configure the input multiplexer policy, determines how addresses are handled from the local router. [noop|spawn|merge]" },
         [ARG_IMMEDIATE] = { .arg=NULL, .description="Start running the inner binary immediately. By default wrapped processes are only started on demand when data arrives." },
         [ARG_VERSION]   = { .arg=NULL, .description="Report which version this program is, then exit." },
-        [ARG_DELIMITER] = { .arg="d",  .description="Configure the packet delimiter, if unspecified, will default to the string null terminator '\0'." },
+        [ARG_DELIMITER] = { .arg="d",  .description="Configure the packet delimiter, if unspecified, will default to the unix string newline '\\n'." },
         0
     };
 #pragma GCC diagnostic pop
@@ -563,7 +540,7 @@ int main(int argc, char ** argv ) {
     // Argument Parsing //
     int arg;
     int indexPtr = 0;
-    while ((arg = getopt_long(argc, argv, "h:a:p:iovd", longOptions, &indexPtr)) != -1) {
+    while ((arg = getopt_long(argc, argv, "h:a:p:iovd:q", longOptions, &indexPtr)) != -1) {
 
         // If we have a short arg, pass it over to the long arg index.
         // Note: This will work assuming we have less than 65(?) long arguments... I think -John.
@@ -619,16 +596,60 @@ int main(int argc, char ** argv ) {
             case 'a':
             case ARG_ADDRESS:
                 config.arg_address = (gnw_address_t) strtoul(optarg, NULL, 16);
+
+                if( (config.arg_address & ~config.gnw_local_mask) != config.arg_address ) {
+                    log_warn( "Node address does not conform to the local mask policy!" );
+                    log_warn( "This may cause problems if this node also has a multiplexing policy which spawns additional sub-processes." );
+                    log_warn( "Mask = %08x, Address = %08x", config.gnw_local_mask, config.arg_address );
+                }
                 break;
 
             case 'i':
             case ARG_INPUT:
-                configure_stdin_input();
+                addNewWatch( STDIN_FILENO );
                 break;
 
             case 'o':
             case ARG_OUTPUT:
                 config.arg_echo = true;
+                if( config_demux.mode != DEMUX_MERGE ) {
+                    log_warn( "Output mode implies a demux policy of 'merge' otherwise the stream will be nonesense. Forcing merge mode." );
+                    config_demux.mode = DEMUX_MERGE;
+                }
+                break;
+            
+            case ARG_MUX:
+                if( strcmp( optarg, "noop" ) )
+                    config_mux.mode = MUX_NOOP;
+                else if( strcmp(optarg, "merge") )
+                    config_mux.mode = MUX_MERGE;
+                else
+                    log_warn( "Unrecognised mux mode '%s', ignored. Using default (NOOP)", optarg );
+                
+                break;
+            
+            case ARG_DEMUX:
+                fprintf( stderr, "ARG = '%s'\n", optarg );
+
+                if( config.arg_echo && strcmp( optarg, "merge" ) != 0 ) {
+                    log_warn( "Output mode implies a demux policy of 'merge' otherwise the stream will be nonesense. Forcing merge mode." );
+                    config_demux.mode = DEMUX_MERGE;
+                    break;
+                }
+                if( strcmp( optarg, "noop" ) == 0 ) {
+                    config_demux.mode = DEMUX_NOOP;
+
+                } else if( strcmp( optarg, "spawn" ) == 0 ) {
+                    config_demux.mode = DEMUX_SPAWN;
+                    log_debug( "Working in DEMUX_SPAWN mode, new streams will spawn new processes." );
+
+                } else if( strcmp( optarg, "merge" ) == 0 ) {
+                    config_demux.mode = DEMUX_MERGE;
+                    log_debug( "Working in DEMUX_MERGE mode, stream addresses with masquerade as the local address." );
+
+                } else
+                    log_warn( "Unrecognised demux mode '%s', ignored. Using default (NOOP)", optarg );
+                
                 break;
 
             case ARG_IMMEDIATE:
@@ -641,7 +662,7 @@ int main(int argc, char ** argv ) {
             
             case ARG_DELIMITER:
             case 'd':
-                /*if( optarg[0] == '\\') {
+                if( optarg[0] == '\\') {
                     switch( optarg[1] ) {
                         case '\\': config.arg_delimiter = '\\'; break;
                         case '0':  config.arg_delimiter = '\0'; break;
@@ -655,8 +676,8 @@ int main(int argc, char ** argv ) {
                     }
                 }
                 else
-                    config.arg_delimiter = optarg[0];*/
-                printf( "Delimiter = '%s'\n", optarg );
+                    config.arg_delimiter = optarg[0];
+                printf( "Delimiter = '%c'\n", config.arg_delimiter );
                 break;
 
             case 'v':
@@ -666,6 +687,13 @@ int main(int argc, char ** argv ) {
                     log_setLevel(INFO);
                 else if (config.arg_verbosity == 3)
                     log_setLevel(DEBUG);
+                
+                fprintf( stderr, "Verbosity = %d\n", config.arg_verbosity );
+
+                break;
+            
+            case 'q':
+                fprintf( stderr, "Verbosity = %d\n", config.arg_verbosity );
 
                 break;
 
@@ -678,109 +706,48 @@ int main(int argc, char ** argv ) {
 
     log_debug( "Going live!" );
     int rfd = getRouterFD();
+    assert( rfd != -1, "Unable to connect to the router, STOP." );
     addNewWatch( rfd );
-
-    gnw_address_t assigned_address = getNodeAddress( config.arg_address );
-    config.arg_address = assigned_address;
-
-    log_debug( "Beginning poll of all known FDs..." );
+    
+    // Ask for an address, note that the router may re-issue the reply, if it needed to.
+    log_debug( "Asking router for an address..." );
+    if( config.arg_address == 0 ) {
+        log_info( "Requesting an address from the router..." );
+        gnw_sendCommand(rfd, GNW_CMD_NEW_ADDRESS);
+    }
+    else {
+        // Bit of a hack - send the requested address with the new address request... Might just be ignored at the router, though!
+        log_info( "Requesting address [%08x] from the router...", config.arg_address );
+        unsigned char reqBuffer[5] = {  0 };
+        uint8_t * ptr = packet_write_u8( reqBuffer, GNW_CMD_NEW_ADDRESS );
+        ptr = packet_write_u32( ptr, config.arg_address );
+        gnw_emitCommandPacket( rfd, GNW_COMMAND, reqBuffer, 5 );
+    }
 
     int status = 0;
     while( status == 0 ) {
+
         int rv = -1;
-        while( status == 0 && (rv = poll(stream_fd, stream_fd_count, 100)) != -1 ) {
+        while( (rv = poll(stream_fd, MAX_INPUT_STREAMS, 100)) > -1 && status == 0 ) {
 
-            // Sanity check
-            if( config.rx_buffer > config.rx_buffer_tail ) {
-                log_error( "Buffer in a corrupted state! About to segfault (probably)!\n" );
-            }
+            /*for( int i=0; i<32; i++ )
+                fprintf( stderr, "%02x ", rx_buffer[i] );
+            fprintf( stderr, "\n" );*/
 
-            int index = 0;
-            while( rv > 0 && index < MAX_INPUT_STREAMS ) {
+            for( int index = 0; index < MAX_INPUT_STREAMS; index++ ) {
                 if( stream_fd[index].revents != 0 ) {
 
-                    unsigned char iBuffer[config.network_mtu];
-                    memset( iBuffer, 0, config.network_mtu ); // This will cause slowdown, but is safer this way.
-
-                    ssize_t readBytes = read(stream_fd[index].fd, iBuffer, config.network_mtu);
-                    if( readBytes < 1 ) {
-                        log_warn( "Stream %d closed unexpectedly", index );
-
-                        if( stream_fd[index].fd == rfd ) {
-                            log_error( "Router closed our connection! Also closing down..." );
-                            status = 1; // Mark us for shutdown.
-                        }
-
-                        if( stream_fd[index].fd == STDIN_FILENO ) {
-                            // Stdin closed, pipe must have gone, OK, shut stuff down.
-                            log_error( "STDIN went offline, pipe must have died. Closing down in turn..." );
-                            status = 1;
-                        }
-
-                        stream_fd[index].fd = -1;
-                    }
-
-                    else if( readBytes > 0 ) {
-                        // Is this the router FD?
-                        if( stream_fd[index].fd == rfd ) {
-                            //printf( "Read %ldB from Router on index = %d\n", readBytes, index );
-
-                            assert( config.rx_buffer_tail >= config.rx_buffer );
-                            assert( config.rx_buffer_tail - config.rx_buffer <= config.network_mtu * 20 ); 
-
-                            packet_write_u8_buffer( config.rx_buffer_tail, iBuffer, readBytes );
-                            config.rx_buffer_tail += readBytes;
-
-                            uint8_t packet_buffer[config.network_mtu + 1];
-                            memset( packet_buffer, 0, config.network_mtu + 1 );
-                            ssize_t readyBytes = 0;
-                            if( (readyBytes = gnw_nextPacket( config.rx_buffer, config.rx_buffer_tail - config.rx_buffer )) != 0 ) {
-
-                                if( readyBytes < 0 ) {
-                                    log_warn( "Network desync, attempting to resync... (Err = %d)", readyBytes );
-                                    while( config.rx_buffer[0] != GNW_MAGIC && config.rx_buffer < config.rx_buffer_tail ) {
-                                        printf( "Dumped 1 byte\n" );
-                                        packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, 1 );
-                                        config.rx_buffer_tail--;
-                                    }
-                                    continue;
-                                }
-
-                                gnw_header_t header = { 0 };
-
-                                uint8_t * ptr = config.rx_buffer;
-                                ptr = packet_read_u8( ptr, &header.magic );
-                                ptr = packet_read_u8( ptr, &header.version );
-                                ptr = packet_read_u8( ptr, &header.type );
-                                ptr = packet_read_u32( ptr, &header.source );
-                                ptr = packet_read_u32( ptr, &header.length );
-
-                                handlePacket( index, &header, ptr );
-
-                                // Shift the buffer and sync up the tail pointer
-                                packet_shift( config.rx_buffer, config.network_mtu * 20, NULL, readyBytes );
-                                config.rx_buffer_tail = config.rx_buffer_tail - (size_t)readyBytes;
-                            }
-
-                        }
-
-                        // Is this stdin?
-                        else if( stream_fd[index].fd == STDIN_FILENO ) {
-                            //printf("Read %ldB from STDIN\n", readBytes);
-
-                            gnw_emitDataPacket( rfd, config.arg_address, iBuffer, readBytes );
-                        }
-                    }
+                    // Is this from the router?
+                    if( stream_fd[index].fd == getRouterFD() )
+                        handleRemoteData( &(stream_fd[index].fd), &status );
+                    else // Otherwise, this must be going TO the router, forward!
+                        handleLocalData( &(stream_fd[index].fd), &status );
 
                     stream_fd[index].revents = 0;
-                    rv--; // Deduct one remaining fd
+                    break;
                 }
 
-                index++; // Walk to the next available fd
             }
-
-            if( rv > 0 )
-                log_warn( "Notified of stream events, but could not find a corresponding FD? Something is going very wrong!" );
         }
 
     }

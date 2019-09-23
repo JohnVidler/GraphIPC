@@ -29,7 +29,7 @@ void log_vwrite( unsigned int level, const char * fmt, va_list args ) {
     if( level < minLogLevel )
         return;
 
-    FILE * stream = stdout;
+    FILE * stream = stderr;
     if( level >= ERROR ){
         stream = stderr;
         fprintf( stream, ANSI_COLOR_RED "[ERROR]\t" );

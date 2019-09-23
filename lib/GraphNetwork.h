@@ -45,11 +45,12 @@
 #define GNW_STATE_ZOMBIE  0xFF
 
 // Valid command operators
-#define GNW_CMD_NEW_ADDRESS  1
-#define GNW_CMD_STATUS       2
-#define GNW_CMD_POLICY       3
-#define GNW_CMD_CONNECT      4
-#define GNW_CMD_DISCONNECT   5
+#define GNW_CMD_NEW_ADDRESS  0x1
+#define GNW_CMD_STATUS       0x2
+#define GNW_CMD_POLICY       0x3
+#define GNW_CMD_CONNECT      0x4
+#define GNW_CMD_DISCONNECT   0x5
+#define GNW_CMD_QUIT         0xff // Not implemented
 
 // Link Constants
 #define GNW_POLICY_BROADCAST  0

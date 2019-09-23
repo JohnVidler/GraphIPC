@@ -35,6 +35,8 @@
 
 volatile gnw_stats_t link_stats;
 
+//#define PACKET_DEBUG
+
 /**
  * Puts a formatted graph address in the character buffer supplied.
  *
@@ -100,7 +102,7 @@ void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length ) {
     }
 
     fprintf( fd, "[ " );
-    for( int i=0; i<payload_length; i++ ) {
+    for( int i=0; i<=payload_length; i++ ) {
         fprintf( fd, "%02x ", *(payload+i) );
     }
     if( etc )
@@ -109,14 +111,33 @@ void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length ) {
 }
 
 void gnw_emitPacket( int fd, unsigned char * buffer, size_t length ) {
+    
+    // This is a kludge to prevent null-sends
+    if( length == 0 )
+        return;
+
+#ifdef PACKET_DEBUG
+    fprintf( stderr, "    >>> " );
+    gnw_dumpPacket( stderr, buffer, length );
+#endif
+
     ssize_t written = write( fd, buffer, length );
     link_stats.bytesWritten += written;
 }
 
 void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, ssize_t length ) {
+
+    // Refuse to send zero-length payloads
+    if( length == 0 ) {
+        log_warn( "Refusing to send a zero-length data payload (pointless!)" );
+        return;
+    }
+
     link_stats.dataPackets++;
 
-    uint8_t * packet = (uint8_t *)malloc( length + 11 );
+    //uint8_t * packet = (uint8_t *)malloc( length + 11 );
+    uint8_t packet[ length + 11 ];
+    memset( packet, 0, length+11 ); // Remove for fast/dangerous mode!
     uint8_t * ptr = packet;
 
     ptr = packet_write_u8( ptr, GNW_MAGIC );
@@ -132,7 +153,7 @@ void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, s
 
     gnw_emitPacket( fd, packet, length + 11 );
 
-    free( packet );
+    //free( packet );
 }
 
 /* Note: This is messy, why do I have two packet types, there should only be one, with a shared type-space!
@@ -142,7 +163,9 @@ __attribute__((deprecated))
 void gnw_emitCommandPacket( int fd, uint8_t type, unsigned char * buffer, ssize_t length ) {
     link_stats.commandPackets++;
 
-    uint8_t * packet = (uint8_t *)malloc( length + 11 );
+    //uint8_t * packet = (uint8_t *)malloc( length + 11 );
+    uint8_t packet[ length + 11 ];
+    memset( packet, 0, length + 11 ); // Remove for fast/dangerous mode!
     uint8_t * ptr = packet;
 
     ptr = packet_write_u8( ptr, GNW_MAGIC );
@@ -158,7 +181,7 @@ void gnw_emitCommandPacket( int fd, uint8_t type, unsigned char * buffer, ssize_
 
     gnw_emitPacket( fd, packet, length + 11 );
 
-    free( packet );
+    //free( packet );
 }
 
 void gnw_sendCommand( int fd, uint8_t command ) {
@@ -206,8 +229,14 @@ ssize_t gnw_nextPacket( uint8_t * buffer, size_t buffer_length ) {
         return -2;
     }
 
-    if( 11 + header.length <= buffer_length )
+    if( 11 + header.length <= buffer_length ) {
+#ifdef PACKET_DEBUG
+        fprintf( stderr, "<<<     " );
+        gnw_dumpPacket( stderr, buffer, 11 + header.length );
+#endif
+
         return 11 + header.length;
+    }
     
     return 0;
 }

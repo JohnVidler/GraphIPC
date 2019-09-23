@@ -65,6 +65,7 @@ typedef struct {
  * Context for a given connection to a running node or subgraph-router.
  */
 typedef struct {
+    int forward_policy;
     kvec_t( gnw_address_t ) forward;
     int bound_fd;
 
@@ -246,14 +247,23 @@ void reset_context( context_t * context ) {
 
     if( context->state != -1 )
         kv_destroy( context->forward );
-
-    context->state = 0;
+    
+    context->forward_policy = -1; // Intentionally invalid
+    context->state = GNW_STATE_CLOSE;
+    context->bound_fd = -1;
 }
 
 void setup_context( context_t * context ) {
-    reset_context( context );
+    context->packets_in = 0;
+    context->packets_out = 0;
+    context->bytes_in = 0;
+    context->bytes_out = 0;
+
     kv_init( context->forward );
-    context->state = 0;
+
+    context->forward_policy = GNW_POLICY_BROADCAST;
+    context->state = GNW_STATE_OPEN;
+    context->bound_fd = -1;
 }
 
 void handle_packet( int fd, uint8_t * buffer, size_t length ) {
@@ -291,19 +301,83 @@ void handle_packet( int fd, uint8_t * buffer, size_t length ) {
 
                     assert( context != NULL, "Null context!" );
 
-                    memset( context, 0, sizeof(context_t) );
-                    setup_context( context );
+                    if( hint == kh_end(address_table) ) {
+                        int status;
+                        hint = kh_put( gnw_address_t, address_table, address_req, &status );
+                        context = &kh_value( address_table, hint );
+                        setup_context( context );
+                    }
+                    context = &kh_value( address_table, hint );
 
                     context->bound_fd = fd; // Bind this fd to this address (or visa-versa)
 
                     // Reply to the client with their assigned address
                     uint8_t reply[5] = { 0 };
-                    uint8_t * next = packet_write_u8( reply, GNW_CMD_NEW_ADDRESS );
+                    uint8_t * out = packet_write_u8( reply, GNW_CMD_NEW_ADDRESS );
                     //next = packet_write_u32( next, 0x1000 );
-                    next = packet_write_u32( next, address_req ); // Just accept _any_ address from the clients for now...
-                    gnw_emitCommandPacket( fd, GNW_COMMAND, reply, 5 );
+                    out = packet_write_u32( out, address_req ); // Just accept _any_ address from the clients for now...
+                    gnw_emitCommandPacket( fd, GNW_REPLY, reply, out - reply );
 
                     break;
+                
+                case GNW_CMD_CONNECT: {
+                    gnw_address_t source = 0;
+                    gnw_address_t target = 0;
+
+                    next = packet_read_u32( next, &source );
+                    next = packet_read_u32( next, &target );
+
+                    // Attempt to get the source context, create if required...
+                    khint_t srcHint = kh_get( gnw_address_t, address_table, source );
+                    context_t * srcContext = NULL;
+
+                    printf( "%p, %p\n", address_table, srcHint );
+
+                    if( srcHint == kh_end(address_table) ) {
+                        int status;
+                        srcHint = kh_put( gnw_address_t, address_table, source, &status );
+                        srcContext = &kh_value( address_table, srcHint );
+                        assert( srcContext != NULL, "Context pointer was NULL!" );
+                        setup_context( srcContext );
+                    }
+                    srcContext = &kh_value( address_table, srcHint );
+
+                    kv_push( gnw_address_t, srcContext->forward, target );
+
+                    log_info( "Connected %lu to %lu\n", source, target );
+                } break;
+
+                case GNW_CMD_DISCONNECT: {
+                    log_error( "UNIMPLEMENTED FUNCTION: DISCONNECT" );
+                } break;
+                
+                case GNW_CMD_POLICY: {
+                    uint8_t policy;
+                    gnw_address_t target;
+
+                    next = packet_read_u8( next, &policy );
+                    next = packet_read_u32( next, &target );
+
+                    khint_t targetHint = kh_get( gnw_address_t, address_table, target );
+                    context_t * targetContext = NULL;
+
+                    if( targetHint == kh_end(address_table) ) {
+                        log_error( "Unable to set the policy on a connection that does not currently exist!" );
+                        break;
+                    }
+                    targetContext = &kh_value( address_table, targetHint );
+
+                    targetContext->forward_policy = policy;
+
+                    const char * policyStr[] = {
+                        [GNW_POLICY_ANYCAST] = "ANYCAST",
+                        [GNW_POLICY_BROADCAST] = "BROADCAST",
+                        [GNW_POLICY_ROUNDROBIN] = "ROUNDROBIN",
+                        "???"
+                    };
+
+                    log_info( "Forward policy set to %s for %08x\n", policyStr[targetContext->forward_policy], target );
+                } break;
 
                 default:
                     log_warn( "Missing handler for command directive %02x", payload[0] );
@@ -313,6 +387,8 @@ void handle_packet( int fd, uint8_t * buffer, size_t length ) {
 
         case GNW_DATA: {
             khint_t hint = kh_get( gnw_address_t, address_table, header.source );
+
+            log_debug( "IN: %08x", header.source );
 
             // Just drop the message, if we don't have a known, bound address for this...
             if( !kh_exist( address_table, hint ) ) {
@@ -327,25 +403,102 @@ void handle_packet( int fd, uint8_t * buffer, size_t length ) {
             entry->bytes_in += length;
             entry->packets_in ++;
 
+            log_debug( "IN-POLICY: %08x", entry->forward_policy );
+
             // TEST BROADCAST MODE ONLY
             // ToDo: This should look up the routing mode, then forward according to the policy to anything
             //       in the entry->forward vector.
             //       Kludge for now...
 
-            khint_t fwd = kh_get( gnw_address_t, address_table, 0x1000 );
-            if( !kh_exist( address_table, fwd ) ) {
-                // ToDo: Should delete any missing destinations!
-                return;
+            switch( entry->forward_policy ) {
+                case GNW_POLICY_BROADCAST: {
+                    for( size_t i = 0; i < kv_size( entry->forward ); i++ ) {
+                        gnw_address_t target = kv_a( gnw_address_t, entry->forward, i );
+
+                        khint_t fwd = kh_get( gnw_address_t, address_table, target );
+                        if( !kh_exist( address_table, fwd ) ) {
+                            log_debug( "Missing or null forward entry, skipped." );
+                            // ToDo: Should delete any missing destinations, but packets will be
+                            // dropped anyway... so.. leave for now?
+                            continue;
+                        }
+
+                        context_t * fwdEntry = &kh_value( address_table, fwd );
+                        if( fwdEntry == NULL || fwd == kh_end(address_table) ) {
+                            log_debug( "Missing or null forward entry, skipped." );
+                            continue;
+                        }
+
+                        log_debug( "BROADCAST: %08x -> %08x (%d)", header.source, target, fwdEntry->bound_fd );
+
+                        // FIXFIXFIX - Might have to be a data packet rather than a bare one!
+                        uint8_t * localRef = buffer;
+                        gnw_emitPacket( fwdEntry->bound_fd, localRef, length ); // Forward wholesale
+
+                        fwdEntry->bytes_out += length;
+                        fwdEntry->packets_out ++;
+                    }
+                } break;
+            
+                case GNW_POLICY_ANYCAST: {
+                    gnw_address_t target = kv_a( gnw_address_t, entry->forward, rand() % kv_size( entry->forward ) );
+
+                    khint_t fwd = kh_get( gnw_address_t, address_table, target );
+                    if( !kh_exist( address_table, fwd ) ) {
+                        log_debug( "Missing or null forward entry, skipped." );
+                        // ToDo: Should delete any missing destinations, but packets will be
+                        // dropped anyway... so.. leave for now?
+                        break;
+                    }
+
+                    context_t * fwdEntry = &kh_value( address_table, fwd );
+                    if( fwdEntry == NULL || fwd == kh_end(address_table) ) {
+                        log_debug( "Missing or null forward entry, skipped." );
+                        break;
+                    }
+
+                    log_debug( "ANYCAST: %08x -> %08x (%d)", header.source, target, fwdEntry->bound_fd );
+
+                    // FIXFIXFIX - Might have to be a data packet rather than a bare one!
+                    uint8_t * localRef = buffer;
+                    gnw_emitPacket( fwdEntry->bound_fd, localRef, length ); // Forward wholesale
+
+                    fwdEntry->bytes_out += length;
+                    fwdEntry->packets_out ++;
+                } break;
+
+                case GNW_POLICY_ROUNDROBIN: {
+                    // Sneaky, using the packets_in count as the round-robin offset, saves a variable kicking around though
+                    gnw_address_t target = kv_a( gnw_address_t, entry->forward, entry->packets_in % kv_size( entry->forward ) );
+
+                    khint_t fwd = kh_get( gnw_address_t, address_table, target );
+                    if( !kh_exist( address_table, fwd ) ) {
+                        log_debug( "Missing or null forward entry, skipped." );
+                        // ToDo: Should delete any missing destinations, but packets will be
+                        // dropped anyway... so.. leave for now?
+                        break;
+                    }
+
+                    context_t * fwdEntry = &kh_value( address_table, fwd );
+                    if( fwdEntry == NULL || fwd == kh_end(address_table) ) {
+                        log_debug( "Missing or null forward entry, skipped." );
+                        break;
+                    }
+
+                    log_debug( "ROUNDROBIN: %08x -> %08x (%d)", header.source, target, fwdEntry->bound_fd );
+
+                    // FIXFIXFIX - Might have to be a data packet rather than a bare one!
+                    uint8_t * localRef = buffer;
+                    gnw_emitPacket( fwdEntry->bound_fd, localRef, length ); // Forward wholesale
+
+                    fwdEntry->bytes_out += length;
+                    fwdEntry->packets_out ++;
+                } break;
+
+                default:
+                    log_error( "Bad forward policy! [%02x]", entry->forward_policy );
             }
 
-            context_t * fwdEntry = &kh_value( address_table, fwd );
-
-            assert( fwdEntry != NULL, "Null forwarding entry!" );
-
-            gnw_emitPacket( fwdEntry->bound_fd, buffer, length ); // Forward wholesale
-
-            fwdEntry->bytes_out += length;
-            fwdEntry->packets_out ++;
         }
         break;
 
@@ -433,7 +586,7 @@ void handle_event( int index, struct pollfd * pollStruct, uint8_t * buffer, ssiz
     // After that, is there any buffer left?
     if( ready_bytes > 0 ) {
         // Isolate, copy and forward
-        uint8_t packet[config.network_mtu];
+        uint8_t packet[ready_bytes];
         packet_shift( local->buffer, buffer_size, packet, ready_bytes );
         local->buffer_tail -= ready_bytes;
 
@@ -479,15 +632,64 @@ int router_process() {
 
     while( config.system_state ) {
 
-        printf( "Known Addresses:\n" );
+        printf( "Address Table:\n" );
         khint_t iter = kh_begin( address_table );
         while( iter != kh_end( address_table ) ) {
-            if( kh_exist( address_table, iter ) )
-                fprintf( stderr, "\t|->\t%08x\n", kh_key( address_table, iter ) );
+            if( kh_exist( address_table, iter ) ) {
+                fprintf( stderr, "\t|->\t%08x ", kh_key( address_table, iter ) );
+
+                context_t * entry = &kh_value( address_table, iter );
+
+                // Has this been marked as dead?
+                if( entry->state == GNW_STATE_CLOSE ) {
+                    fprintf( stderr, "{CLOSED}\n" );
+                    continue;
+                }
+
+                if ( kv_size(entry->forward) == 0 ) {
+                    fprintf( stderr, "{drop} to {∅}" );
+                }
+                else {
+                    switch( entry->forward_policy ) {
+                        case GNW_POLICY_BROADCAST: fprintf( stderr, "{broadcast}" ); break;
+                        case GNW_POLICY_ANYCAST: fprintf( stderr, "{anycasy}" ); break;
+                        case GNW_POLICY_ROUNDROBIN: fprintf( stderr, "{round-robin}" ); break;
+                        default: fprintf( stderr, "{BAD POLICY}" );
+                    }
+                    fprintf( stderr, " to { " );
+                    for( size_t i = 0; i < kv_size( entry->forward ); i++ ) {
+                        gnw_address_t target = kv_a( gnw_address_t, entry->forward, i );
+                        fprintf( stderr, "%08x ", target );
+                    }
+                    fprintf( stderr, "}" );
+                }
+
+                char * fmtBytesInUnit;
+                double fmtBytesIn = fmt_iec_size( entry->bytes_in, &fmtBytesInUnit );
+
+                char * fmtBytesOutUnit;
+                double fmtBytesOut = fmt_iec_size( entry->bytes_out, &fmtBytesOutUnit );
+
+                fprintf( stderr,
+                    "\t%.2f %s\t%.2f %s\tPackets (%lu/%lu)\t%s",
+                    fmtBytesIn,
+                    fmtBytesInUnit,
+                    fmtBytesOut,
+                    fmtBytesOutUnit,
+                    entry->packets_in,
+                    entry->packets_out,
+                    entry->bound_fd > -1 ? "BOUND" : "---" );
+
+                fprintf( stderr, "\n" );
+
+                //gnw_emitPacket( entry->bound_fd, "EHLO\n", 5 ); // Forward wholesale
+            }
 
             iter++;
         }
 
+        // Uncomment for buffer debug //
+        /*
         printf( "Local Buffers (%d):\n", kh_size( local_buffer ) );
         iter = kh_begin( local_buffer );
         while( iter != kh_end( local_buffer ) ) {
@@ -502,9 +704,11 @@ int router_process() {
             iter++;
         }
         printf( "\n" );
+        */
 
+        uint32_t jumpout = 0;
         int events = -1;
-        while( (events = poll( poll_list, MAX_MONITOR_FDS, 1000 )) > 0 ) {
+        while( (events = poll( poll_list, MAX_MONITOR_FDS, 10000 )) > 0 && jumpout++ < 4000 ) {
 
             // Is this an event on the listen socket?
             if( poll_list[0].revents != 0 ) {
@@ -527,7 +731,7 @@ int router_process() {
                         break;
                     }
                 }
-
+              
                 if( poll_list[entry].fd != remote_fd ) {
                     log_warn( "No more free sockets, dropping the new one." );
                     close( remote_fd );
@@ -689,19 +893,19 @@ int main(int argc, char ** argv ) {
 
                 case 'p':
                 case ARG_POLICY: {
-                    unsigned char buffer[2 + sizeof(gnw_address_t)];
-                    *buffer = GNW_CMD_POLICY;
+                    unsigned char buffer[2 + sizeof(gnw_address_t)] = { 0 };
+                    uint8_t * next = packet_write_u8( buffer, GNW_CMD_POLICY );
 
                     if( strncmp(optarg, "broadcast", 9 ) == 0 )
-                        *(buffer+1) = GNW_POLICY_BROADCAST;
+                        next = packet_write_u8( next, GNW_POLICY_BROADCAST );
                     else if( strncmp(optarg, "roundrobin", 10 ) == 0 )
-                        *(buffer+1) = GNW_POLICY_ROUNDROBIN;
+                        next = packet_write_u8( next, GNW_POLICY_ROUNDROBIN );
                     else if( strncmp(optarg, "anycast", 7 ) == 0 )
-                        *(buffer+1) = GNW_POLICY_ANYCAST;
+                        next = packet_write_u8( next, GNW_POLICY_ANYCAST );
 
-                    *(gnw_address_t *)(buffer+2) = arg_target_address;
+                    next = packet_write_u32( next, arg_target_address );
 
-                    gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 2+sizeof(gnw_address_t) );
+                    gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, next - buffer );
 
                     close(rfd);
                     return EXIT_SUCCESS;
@@ -710,17 +914,14 @@ int main(int argc, char ** argv ) {
                 case 'c':
                 case ARG_CONNECT: {
                     printf( "Connect!\n" );
-                    unsigned char buffer[1 + (sizeof(gnw_address_t)*2) ];
-                    *buffer = GNW_CMD_CONNECT;
-                    gnw_address_t * source = (gnw_address_t *)(buffer+1);
-                    gnw_address_t * target = (gnw_address_t *)(buffer+1+sizeof(gnw_address_t));
-
-                    *source = arg_source_address;
-                    *target = arg_target_address;
+                    unsigned char buffer[1 + (sizeof(gnw_address_t)*2) ] = { 0 };
+                    uint8_t * next = packet_write_u8( buffer, GNW_CMD_CONNECT );
+                    next = packet_write_u32( next, arg_source_address );
+                    next = packet_write_u32( next, arg_target_address );
 
                     printf( "%x -> %x\n", arg_source_address, arg_target_address );
 
-                    gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 1+ (sizeof(gnw_address_t)*2) );
+                    gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, next - buffer );
 
                     close(rfd);
                     return EXIT_SUCCESS;
@@ -728,8 +929,11 @@ int main(int argc, char ** argv ) {
 
                 case 'd':
                 case ARG_DISCONNECT: {
-                    unsigned char buffer[1] = {GNW_CMD_DISCONNECT};
-                    gnw_emitCommandPacket(rfd, GNW_COMMAND, buffer, 1);
+                    unsigned char buffer[1 + sizeof(gnw_address_t)*2 ] = { 0 };
+                    uint8_t * next = packet_write_u8( buffer, GNW_CMD_DISCONNECT );
+                    next = packet_write_u32( next, arg_source_address );
+                    next = packet_write_u32( next, arg_target_address );
+                    gnw_emitCommandPacket( rfd, GNW_COMMAND, buffer, next - buffer );
 
                     close(rfd);
                     return EXIT_SUCCESS;
