@@ -40,6 +40,7 @@
 #include <getopt.h>
 #include "lib/klib/khash.h"
 #include "lib/klib/kvec.h"
+#include <netinet/tcp.h>
 
 #define MAX_MONITOR_FDS 128
 
@@ -254,6 +255,7 @@ void reset_context( context_t * context ) {
 }
 
 void setup_context( context_t * context ) {
+    memset( context, 0, sizeof( context_t ) ); // Mostly just in case
     context->packets_in = 0;
     context->packets_out = 0;
     context->bytes_in = 0;
@@ -291,7 +293,7 @@ void handle_packet( int fd, uint8_t * buffer, size_t length ) {
                     log_debug( "New address request" );
 
                     // Generate a random address, else use the requested one.
-                    gnw_address_t address_req = 0xFFFFF000 & rand(); // Random address
+                    gnw_address_t address_req = 0xFFFFF000 & rand(); // Random address, default mask
                     if( header.length == 5 )
                         packet_read_u32( next, &address_req );
 
@@ -721,6 +723,12 @@ int router_process() {
                     perror( "accept" );
                     continue;
                 }
+
+                // Disable Nagle, otherwise small packets will be held back.
+                int flag = 1;
+                int result = setsockopt( remote_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int) );
+                if (result < 0)
+                    log_warn( "Unable to disable Nagle algorithm on the router socket, expect packet delays!" );
 
                 // Push this new socket onto a blank on the poll list
                 int entry = 1;

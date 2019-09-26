@@ -129,7 +129,7 @@ void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, s
 
     // Refuse to send zero-length payloads
     if( length == 0 ) {
-        log_warn( "Refusing to send a zero-length data payload (pointless!)" );
+        //log_warn( "Refusing to send a zero-length data payload (pointless!)" ); // Uncomment for terminal spam :)
         return;
     }
 

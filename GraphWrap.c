@@ -35,6 +35,8 @@
 #include <wait.h>
 #include <arpa/inet.h>
 #include "lib/klib/khash.h"
+#include <signal.h>
+#include <netinet/tcp.h>
 
 #define LOG_NAME "GraphWrap"
 
@@ -80,6 +82,9 @@ struct _demux_config{
 };
 
 typedef struct {
+    pid_t pid;
+    gnw_address_t address;
+    
     int wrap_stdin[2];
     int wrap_stdout[2];
 
@@ -88,17 +93,19 @@ typedef struct {
 
     uint64_t bytes_in;
     uint64_t bytes_out;
-
-    uint8_t * outputBuffer;
-
-    char * binary;
-    char ** binary_arguments;
 } sink_context_t;
+
+struct _binary_config {
+    char *  path;
+    int     argc;
+    char *  argv[20];
+};
 
 // Configuration structures, for namespace sanity
 struct _configuration config;
 struct _mux_config    config_mux;
 struct _demux_config  config_demux;
+struct _binary_config config_binary;
 
 // This can only ever grow, due to internal constraints, which is unfortunate...
 struct pollfd    stream_fd[MAX_INPUT_STREAMS];
@@ -128,8 +135,13 @@ local_buffer_t * getLocalBuffer( int fd ) {
         // Create a new buffer set!
         int status;
         hint = kh_put( int, input_buffer, fd, &status );
-        kh_value( input_buffer, hint ).head = (uint8_t *)malloc( config.network_mtu * 20 );
-        kh_value( input_buffer, hint ).tail = kh_value( input_buffer, fd ).head;
+        assert( status != 0, "Another bucket was deleted in the input_buffer table!" );
+
+        //fprintf( stderr, "STATUS = %d\n", status );
+
+        local_buffer_t * local = &kh_value( input_buffer, hint );
+        local->head = (uint8_t *)malloc( config.network_mtu * 20 );
+        local->tail = local->head;
     }
 
     return &kh_value( input_buffer, hint );
@@ -149,6 +161,66 @@ void destroyLocalBuffer( int fd ) {
     buffer->tail = NULL;
 }
 
+int router_fd = -1;
+int getRouterFD() {
+    if( router_fd == -1 ) {
+        log_info( "Connecting to router at %s:%s...", config.arg_host, config.arg_port );
+        router_fd = socket_connect( config.arg_host, config.arg_port );
+
+        int flag = 1;
+        int result = setsockopt( router_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int) );
+        if (result < 0)
+            log_warn( "Unable to disable Nagle algorithm on the router socket, expect packet delays!" );
+    }
+    return router_fd;
+}
+
+gnw_address_t getNextLocalAddress() {
+    nextLocalAddress = (nextLocalAddress+1) & config.gnw_local_mask;
+
+    gnw_address_t realAddress = (nextLocalAddress & config.gnw_local_mask) | (config.arg_address & (~config.gnw_local_mask));
+
+    // Claim this address for our FD on the router
+    log_info( "Requesting address [%08x] from the router...", realAddress );
+    unsigned char reqBuffer[5] = { 0 };
+    uint8_t * ptr = packet_write_u8( reqBuffer, GNW_CMD_NEW_ADDRESS );
+    ptr = packet_write_u32( ptr, realAddress );
+    gnw_emitCommandPacket( getRouterFD(), GNW_COMMAND, reqBuffer, 5 );
+    
+    return realAddress;
+}
+
+/**
+ * Exec into a new process, binding the stdin and stdout pipes to the graph network.
+ *
+ * Should never return under normal operation, but may return '-1' if an error occurred
+ * during the setup phase. The error text will be reported on stderr for resident
+ * processes, or the syslog for daemon ones.
+ *
+ * @param wrap_stdin The file descriptor to use for this process' stdin stream
+ * @param wrap_stdout The file descriptor to use for this process' stdout stream
+ * @param cmd The executable to become when exec-ing
+ * @param argv Any arguments to pass to the new process
+ * @return -1 on an error, or never returns
+ */
+int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** argv ) {
+
+    log_error( "Launching subprocess..." );
+
+    // Capture stdout to wrap_stdout
+    dup2( wrap_stdin,  STDIN_FILENO  );
+    dup2( wrap_stdout, STDOUT_FILENO );
+
+    //printf( "FAKESTUFF\n" );
+
+    int result = execve( cmd, argv, environ );
+
+    if( result != 0 )
+        log_error( "Process terminated with error: %s", strerror(errno) );
+
+    return -1;
+}
+
 gnw_address_t applyMuxPolicy( gnw_address_t address ) {
     switch( config_mux.mode ) {
         // Do nothing
@@ -163,6 +235,60 @@ gnw_address_t applyMuxPolicy( gnw_address_t address ) {
             log_error( "BAD MUX MODE - Mux state corrupted!" );
     }
     return address;
+}
+
+sink_context_t * autoSpawn( gnw_address_t address ) {
+    // Become two actual processes, launch the child.
+    log_info( "Starting new subprocess..." );
+    int status;
+    khint_t hint = kh_put( gnw_address_t, sinkTable, address, &status );
+    sink_context_t * context = &kh_value( sinkTable, hint );
+    context->bytes_in     = 0;
+    context->bytes_out    = 0;
+    context->packets_in   = 0;
+    context->packets_out  = 0;
+    
+    // Build a new set of redirected pipes
+    if( pipe( context->wrap_stdin ) == -1 ) {
+        log_error( "Could not create wrapper for subprocess stdin" );
+        exit( EXIT_FAILURE );
+    }
+
+    if( pipe( context->wrap_stdout ) == -1 ) {
+        log_error( "Could not create wrapper for subprocess stdout" );
+        exit( EXIT_FAILURE );
+    }
+
+    log_warn( "Init: %s", config_binary.path );
+
+    pid_t childPID = fork();
+    if( childPID == 0 ) {
+        // Close the invalid ends of the pipes (for the child)
+        close( PIPE_WRITE(context->wrap_stdin) );
+        close( PIPE_READ(context->wrap_stdout) );
+
+        processRunner(
+            PIPE_READ(context->wrap_stdin),
+            PIPE_WRITE(context->wrap_stdout),
+            config_binary.path,
+            config_binary.argv );
+
+        log_error( "Process failed to spawn and returned to the parent after fork() - Cannot continue! HALT." );
+        exit( EXIT_FAILURE );
+    }
+
+    // Close the invalid ends of the pipes (for the parent)
+    close( PIPE_READ(context->wrap_stdin) );
+    close( PIPE_WRITE(context->wrap_stdout) );
+    
+    // If we're here, we're the parent, and should have process ID
+    context->pid = childPID;
+    log_debug( "Child PID = %ld\n", context->pid );
+
+    // Go live, become a node on the router and connect our new output FD
+    addNewWatch( PIPE_READ(context->wrap_stdout) );
+
+    return context;
 }
 
 gnw_address_t applyDeMuxPolicy( gnw_address_t address ) {
@@ -183,9 +309,11 @@ gnw_address_t applyDeMuxPolicy( gnw_address_t address ) {
             if( hint != kh_end( sinkTable ) )
                 return address;
             
+            // If we're here, we have no configured subprocess... So fire one up
+            address = getNextLocalAddress();
+            autoSpawn( address );
 
-            
-            log_warn( "Unimplemented function DEMUX_SPAWN" );
+            return address;
         } break;
         
         // Drop the local addresses and rewrite as the node address
@@ -198,28 +326,6 @@ gnw_address_t applyDeMuxPolicy( gnw_address_t address ) {
 
     log_error( "Fell though to default state! Could not apply DeMux policy" );
     return 0xFFFFFFFF;
-}
-
-int router_fd = -1;
-int getRouterFD() {
-    if( router_fd == -1 ) {
-        log_info( "Connecting to router at %s:%s...", config.arg_host, config.arg_port );
-        router_fd = socket_connect( config.arg_host, config.arg_port );
-    }
-    return router_fd;
-}
-
-gnw_address_t getNextLocalAddress() {
-    nextLocalAddress = (nextLocalAddress+1) & config.gnw_local_mask;
-
-    // Claim this address for our FD on the router
-    log_info( "Requesting address [%08x] from the router...", nextLocalAddress );
-    unsigned char reqBuffer[5] = { 0 };
-    uint8_t * ptr = packet_write_u8( reqBuffer, GNW_CMD_NEW_ADDRESS );
-    ptr = packet_write_u32( ptr, nextLocalAddress );
-    gnw_emitCommandPacket( getRouterFD(), GNW_COMMAND, reqBuffer, 5 );
-    
-    return nextLocalAddress;
 }
 
 int dropRouterFD() {
@@ -241,32 +347,9 @@ int addNewWatch( int fd ) {
     return index;
 }
 
-/**
- * Exec into a new process, binding the stdin and stdout pipes to the graph network.
- *
- * Should never return under normal operation, but may return '-1' if an error occurred
- * during the setup phase. The error text will be reported on stderr for resident
- * processes, or the syslog for daemon ones.
- *
- * @param wrap_stdin The file descriptor to use for this process' stdin stream
- * @param wrap_stdout The file descriptor to use for this process' stdout stream
- * @param cmd The executable to become when exec-ing
- * @param argv Any arguments to pass to the new process
- * @return -1 on an error, or never returns
- */
-int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** argv ) {
-    // Capture stdout to wrap_stdout
-    dup2( wrap_stdin,  STDIN_FILENO  );
-    dup2( wrap_stdout, STDOUT_FILENO );
-
-    log_debug( "Process started" );
-
-    int result = execve( cmd, argv, environ );
-
-    if( result != 0 )
-        log_error( "Process terminated with error: %s", strerror(errno) );
-
-    return -1;
+int fd_is_valid(int fd)
+{
+    return fcntl(fd, F_GETFD) != -1 || errno != EBADF;
 }
 
 void handleDataPacket( gnw_header_t * header, uint8_t * payload ) {
@@ -316,8 +399,15 @@ void handleCommandPacket( gnw_header_t * header, uint8_t * payload ) {
 
     switch( directive ) {
         case GNW_CMD_NEW_ADDRESS:
-            next = packet_read_u32( next, &config.arg_address );
-            log_info( "Router issued us address: %08x", config.arg_address );
+            if( config.arg_address == 0 ) {
+                next = packet_read_u32( next, &config.arg_address );
+                log_info( "Router issued us address: %08x", config.arg_address );
+            }
+            else {
+                gnw_address_t subAddress = 0;
+                next = packet_read_u32( next, &subAddress );
+                log_info( "Router issued us inner address: %08x", subAddress );
+            }
             break;
 
         default:
@@ -343,17 +433,9 @@ void handlePacket( gnw_header_t * header, uint8_t * payload ) {
         default:
             log_error( "BAD PACKET TYPE (%u) - Unknown packet type! Line corruption or version mismatch?", header->type );
     }
-
-    /*FILE * file = fdopen( PIPE_WRITE(context->wrap_stdin), "w" );
-    size_t written = fwrite( payload, sizeof(unsigned char), header->length, file );
-    if( written != header->length ) {
-        log_warn( "Could not write buffered data to the child process, OS buffer overflow?" );
-        log_warn( "Data has been lost" );
-    }
-    fflush( file );*/
 }
 
-void handleRemoteData( int * fd, int * shutdown ) {
+void handleRemoteData( int * fd, int * shutdown, unsigned int events ) {
     local_buffer_t * buffer = getLocalBuffer( *fd );
 
     size_t capacity = (config.network_mtu * 20) - (buffer->tail - buffer->head);
@@ -361,7 +443,7 @@ void handleRemoteData( int * fd, int * shutdown ) {
 
     // Did the read fail?
     if( actualRead < 1 ) {
-        log_warn( "Stream closed unexpectedly" );
+        log_warn( "Remote stream %d closed unexpectedly", *fd );
 
         if( *fd == getRouterFD() ) {
             log_error( "Router closed our connection! Also closing down..." );
@@ -370,7 +452,6 @@ void handleRemoteData( int * fd, int * shutdown ) {
 
         destroyLocalBuffer( *fd );
         *fd = -1; // Clear the FD reference so poll doesn't use it later
-
         return;
     }
 
@@ -409,7 +490,7 @@ void handleRemoteData( int * fd, int * shutdown ) {
     }
 }
 
-void handleLocalData( int * fd, int * shutdown ) {
+void handleLocalData( int * fd, int * shutdown, unsigned int events ) {
     local_buffer_t * buffer = getLocalBuffer( *fd );
 
     size_t capacity = (config.network_mtu * 20) - (buffer->tail - buffer->head);
@@ -417,16 +498,30 @@ void handleLocalData( int * fd, int * shutdown ) {
 
     // Did the read fail?
     if( actualRead < 1 ) {
-        log_warn( "Stream closed unexpectedly" );
+        if( (events & POLLNVAL) == POLLNVAL || (events & POLLHUP) == POLLHUP || !fd_is_valid(*fd) ) {
+            log_warn( "Local stream %d closed unexpectedly", *fd );
 
-        if( *fd == STDIN_FILENO ) {
-            // Stdin closed, pipe must have gone, OK, shut stuff down.
-            log_error( "STDIN went offline, pipe must have died. Closing down in turn..." );
-            *shutdown = 1;
+            if( *fd == STDIN_FILENO ) {
+                // Stdin closed, pipe must have gone, OK, shut stuff down.
+                log_error( "STDIN went offline, pipe must have died. Closing down in turn..." );
+                *shutdown = 1;
+            }
+
+            khint_t iter = kh_begin( sinkTable );
+            while( iter != kh_end( sinkTable ) ) {
+                if( kh_exist( sinkTable, iter ) == 1 ) {
+                    sink_context_t * context = &kh_value( sinkTable, iter );
+                    if( *fd == PIPE_READ(context->wrap_stdout) ) {
+                        kh_del( gnw_address_t, sinkTable, iter );
+                        break;
+                    }
+                }
+                iter++;
+            }
+
+            destroyLocalBuffer( *fd );
+            *fd = -1; // Clear the FD reference so poll doesn't use it later
         }
-
-        destroyLocalBuffer( *fd );
-        *fd = -1; // Clear the FD reference so poll doesn't use it later
 
         return;
     }
@@ -436,14 +531,15 @@ void handleLocalData( int * fd, int * shutdown ) {
 
     uint8_t * cursor = buffer->head;
     while( cursor < buffer->tail ) {
-        if( *cursor == config.arg_delimiter ) {
+        if( *cursor++ == config.arg_delimiter ) {
             gnw_emitDataPacket( router_fd, config.arg_address, buffer->head, cursor - buffer->head );
             assert( cursor - buffer->head <= config.network_mtu * 20, "Cursor blew off the end of the local buffer!" );
             packet_shift( buffer->head, config.network_mtu * 20, NULL, cursor - buffer->head );
             buffer->tail -= cursor - buffer->head;
             cursor = buffer->head;
         }
-        cursor++;
+        else
+            cursor++;
     }
 }
 
@@ -468,6 +564,9 @@ typedef struct {
 #define ARG_QUIET      13
 
 int main(int argc, char ** argv ) {
+    // Prevent the kernel from hanging on to our child processes later on
+    signal( SIGCHLD, SIG_IGN );
+
     // Initial states
     for( int i=0; i<256; i++ ) {
         stream_fd[i].fd = IGNORE_FD; // Ignore every FD, for now
@@ -704,6 +803,31 @@ int main(int argc, char ** argv ) {
         }
     }
 
+    // Read beyond the normal arguments to get the inner binary arguments
+    if( argc - optind > 0 ) {
+        log_info( "Additional command line arguments, configuring inner binary..." );
+
+        const int inner_binary_index = optind;
+
+        config_binary.path = (char *)malloc( 2048 );
+        memset( config_binary.path, 0, 2048 );
+
+        config_binary.argc = argc - optind;
+
+        // Search using the system path for the 'real' binary
+        findRealPath( config_binary.path, argv[inner_binary_index] );
+
+        for( int i = 0; i < config_binary.argc; i++ ){
+            config_binary.argv[i] = argv[inner_binary_index + i];
+        }
+        config_binary.argv[config_binary.argc] = NULL;
+
+        if( strlen(config_binary.path) == 0 ) {
+            log_error( "Could not find %s anywhere on your PATH. STOP.", argv[inner_binary_index] );
+            exit( 0 );
+        }
+    }
+
     log_debug( "Going live!" );
     int rfd = getRouterFD();
     assert( rfd != -1, "Unable to connect to the router, STOP." );
@@ -718,7 +842,7 @@ int main(int argc, char ** argv ) {
     else {
         // Bit of a hack - send the requested address with the new address request... Might just be ignored at the router, though!
         log_info( "Requesting address [%08x] from the router...", config.arg_address );
-        unsigned char reqBuffer[5] = {  0 };
+        unsigned char reqBuffer[5] = { 0 };
         uint8_t * ptr = packet_write_u8( reqBuffer, GNW_CMD_NEW_ADDRESS );
         ptr = packet_write_u32( ptr, config.arg_address );
         gnw_emitCommandPacket( rfd, GNW_COMMAND, reqBuffer, 5 );
@@ -734,16 +858,42 @@ int main(int argc, char ** argv ) {
                 fprintf( stderr, "%02x ", rx_buffer[i] );
             fprintf( stderr, "\n" );*/
 
+            // Debug sink dump
+            /*fprintf( stderr, "Sinks:\n" );
+            khint_t iter = kh_begin( sinkTable );
+            while( iter != kh_end( sinkTable ) ) {
+                if( kh_exist( sinkTable, iter ) == 1 ) {
+                    sink_context_t * tmp = &kh_value( sinkTable, iter );
+                    fprintf(
+                        stderr,
+                        "\t%d -> %08x (%ld/%ld) [%ld/%ld]\n",
+                        iter,
+                        kh_key( sinkTable, iter ),
+                        tmp->bytes_in,
+                        tmp->bytes_out,
+                        tmp->packets_in,
+                        tmp->packets_out );
+                }
+                iter++;
+            }
+            fprintf( stderr, "\n" );*/
+
             for( int index = 0; index < MAX_INPUT_STREAMS; index++ ) {
                 if( stream_fd[index].revents != 0 ) {
 
                     // Is this from the router?
-                    if( stream_fd[index].fd == getRouterFD() )
-                        handleRemoteData( &(stream_fd[index].fd), &status );
-                    else // Otherwise, this must be going TO the router, forward!
-                        handleLocalData( &(stream_fd[index].fd), &status );
+                    if( stream_fd[index].fd == getRouterFD() ) {
+                        handleRemoteData( &(stream_fd[index].fd), &status, stream_fd[index].revents );
+                        stream_fd[index].revents = 0;
+                    }
+                    else { // Otherwise, this must be going TO the router, forward!
+                        if( config.arg_address != 0 ) {
+                            handleLocalData( &(stream_fd[index].fd), &status, stream_fd[index].revents );
+                            stream_fd[index].revents = 0;
+                        }
+                    }
 
-                    stream_fd[index].revents = 0;
+                    
                     break;
                 }
 

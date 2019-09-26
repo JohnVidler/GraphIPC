@@ -104,25 +104,28 @@ int getIFaceMTU( const char * interface ) {
  * @param binary The file to search for.
  */
 void findRealPath( char * target, const char * binary ) {
-    char pathBuffer[2048] = { 0 };
-    size_t env_path_length = strlen( getenv( "PATH" ) );
-    char * path = alloca( env_path_length + 1 );
-    memcpy( path, getenv( "PATH" ), env_path_length );
-
-    char * parent = strtok( path, ":" );
-    while( parent != NULL ) {
-        memset( pathBuffer, 0, 2048 );
-        sprintf( pathBuffer, "%s/%s", parent, binary );
-
-        if( access(pathBuffer, F_OK) != -1 ) {
-            sprintf( target, "%s/%s", parent, binary );
-            free( path );
-            return;
+    char * dup = strdup(getenv("PATH"));
+    char * s = dup;
+    char * p = NULL;
+    do {
+        p = strchr( s, ':' );
+        if( p != NULL ){
+            p[0] = 0;
         }
 
-        parent = strtok( NULL, ":" );
-    }
+        char tryPath[ strlen(s) + strlen(binary) + 2 ];
+        memset( tryPath, 0, strlen(s) + strlen(binary) + 2 );
+        sprintf( tryPath, "%s/%s", s, binary );
 
-    // Guess we must have an actual path already...
-    sprintf( target, "%s", binary );
+        if( access(tryPath, F_OK) != -1 ) {
+            fprintf( stderr, "Path in $PATH: %s\n", tryPath );
+            memcpy( target, tryPath, strlen(tryPath) );
+            free( dup );
+            return;
+        }
+        s = p + 1;
+    } while( p != NULL );
+
+    free( dup );
+    *target = '\0';
 }
