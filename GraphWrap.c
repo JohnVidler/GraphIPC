@@ -36,6 +36,7 @@
 #include <arpa/inet.h>
 #include "lib/klib/khash.h"
 #include <signal.h>
+#include <termios.h>
 #include <netinet/tcp.h>
 
 #define LOG_NAME "GraphWrap"
@@ -125,6 +126,35 @@ typedef struct {
 KHASH_MAP_INIT_INT( int, local_buffer_t );
 khash_t(int) * input_buffer;
 
+struct termios saved_attributes;
+
+void reset_input_mode (void) {
+    tcsetattr (STDIN_FILENO, TCSANOW, &saved_attributes);
+}
+
+void set_input_mode (void) {
+    struct termios tattr;
+    char *name;
+
+    /* Make sure stdin is a terminal. */
+    if (!isatty (STDIN_FILENO)) {
+        fprintf (stderr, "Not a terminal.\n");
+        exit (EXIT_FAILURE);
+    }
+
+    /* Save the terminal attributes so we can restore them later. */
+    tcgetattr (STDIN_FILENO, &saved_attributes);
+    atexit (reset_input_mode);
+
+    /* Set the funny terminal modes. */
+    tcgetattr (STDIN_FILENO, &tattr);
+    tattr.c_lflag &= ~(ICANON|ECHO); /* Clear ICANON and ECHO. */
+    tattr.c_cc[VMIN] = 1;
+    tattr.c_cc[VTIME] = 0;
+    tcsetattr (STDIN_FILENO, TCSAFLUSH, &tattr);
+}
+
+
 local_buffer_t * getLocalBuffer( int fd ) {
     khint_t hint = kh_get( int, input_buffer, fd );
 
@@ -205,13 +235,11 @@ gnw_address_t getNextLocalAddress() {
  */
 int processRunner( int wrap_stdin, int wrap_stdout, const char * cmd, char ** argv ) {
 
-    log_error( "Launching subprocess..." );
+    log_info( "Launching subprocess..." );
 
     // Capture stdout to wrap_stdout
     dup2( wrap_stdin,  STDIN_FILENO  );
     dup2( wrap_stdout, STDOUT_FILENO );
-
-    //printf( "FAKESTUFF\n" );
 
     int result = execve( cmd, argv, environ );
 
@@ -292,40 +320,24 @@ sink_context_t * autoSpawn( gnw_address_t address ) {
 }
 
 gnw_address_t applyDeMuxPolicy( gnw_address_t address ) {
+    if( config_demux.mode == DEMUX_MERGE )
+        address = config.arg_address;
 
-    fprintf( stderr, "Policy = %d\n", config_demux.mode );
+    // Try to find an existing address match 
+    khint_t hint = kh_get( gnw_address_t, sinkTable, address );
 
-    switch( config_demux.mode ) {
+    // If we have a non-end match, there must already be a sink for this. Do nothing.
+    if( hint != kh_end( sinkTable ) )
+        return address;
+    
+    // If we're here, we have no configured subprocess... So fire one up
+    if( config_demux.mode == DEMUX_SPAWN )
+        address = getNextLocalAddress();
 
-        // Preserve the addresses and pass through.
-        case DEMUX_NOOP:
-            return address;
+    fprintf( stderr, "AUTOSPAWN\n" );
+    autoSpawn( address );
 
-        case DEMUX_SPAWN: {
-            // Try to find an existing address match 
-            khint_t hint = kh_get( gnw_address_t, sinkTable, address );
-
-            // If we have a non-end match, there must already be a sink for this. Do nothing.
-            if( hint != kh_end( sinkTable ) )
-                return address;
-            
-            // If we're here, we have no configured subprocess... So fire one up
-            address = getNextLocalAddress();
-            autoSpawn( address );
-
-            return address;
-        } break;
-        
-        // Drop the local addresses and rewrite as the node address
-        case DEMUX_MERGE:
-            return config.arg_address;
-        
-        default:
-            log_error( "BAD DEMUX MODE - DeMux state corrupted!" );
-    }
-
-    log_error( "Fell though to default state! Could not apply DeMux policy" );
-    return 0xFFFFFFFF;
+    return address; // Return the mangled address :)
 }
 
 int dropRouterFD() {
@@ -343,7 +355,7 @@ int addNewWatch( int fd ) {
     }
     stream_fd[index].fd = fd;
     stream_fd[index].events = POLLIN;
-    
+
     return index;
 }
 
@@ -386,9 +398,6 @@ void handleDataPacket( gnw_header_t * header, uint8_t * payload ) {
 }
 
 void handleCommandPacket( gnw_header_t * header, uint8_t * payload ) {
-    // All command packets are handled as the node address, irrespective of the source
-    // address in the header.
-
     uint8_t directive = 0xff;
     uint8_t * next = packet_read_u8( payload, &directive );
 
@@ -529,17 +538,25 @@ void handleLocalData( int * fd, int * shutdown, unsigned int events ) {
     buffer->tail += actualRead;
     size_t remainingCapacity = (config.network_mtu * 20) - (buffer->tail - buffer->head);
 
+    // Are we essentially full?
+    if( remainingCapacity < config.network_mtu ) {
+        // Emergency send! About to blow off the end of the buffer!
+        gnw_emitDataPacket( router_fd, applyMuxPolicy(config.arg_address), buffer->head, buffer->tail );
+        buffer->tail = buffer->head;
+        return;
+    }
+
     uint8_t * cursor = buffer->head;
     while( cursor < buffer->tail ) {
-        if( *cursor++ == config.arg_delimiter ) {
-            gnw_emitDataPacket( router_fd, config.arg_address, buffer->head, cursor - buffer->head );
+        if( *cursor == config.arg_delimiter ) {
+            gnw_emitDataPacket( router_fd, applyMuxPolicy(config.arg_address), buffer->head, cursor - buffer->head );
             assert( cursor - buffer->head <= config.network_mtu * 20, "Cursor blew off the end of the local buffer!" );
             packet_shift( buffer->head, config.network_mtu * 20, NULL, cursor - buffer->head );
             buffer->tail -= cursor - buffer->head;
             cursor = buffer->head;
+
         }
-        else
-            cursor++;
+        cursor++;
     }
 }
 
@@ -752,6 +769,7 @@ int main(int argc, char ** argv ) {
                 break;
 
             case ARG_IMMEDIATE:
+                log_warn( "Immediate mode!" );
                 config.arg_immediate = true;
                 break;
 
@@ -828,6 +846,8 @@ int main(int argc, char ** argv ) {
         }
     }
 
+    //set_input_mode();
+
     log_debug( "Going live!" );
     int rfd = getRouterFD();
     assert( rfd != -1, "Unable to connect to the router, STOP." );
@@ -848,34 +868,43 @@ int main(int argc, char ** argv ) {
         gnw_emitCommandPacket( rfd, GNW_COMMAND, reqBuffer, 5 );
     }
 
+    // Do we need to pre-load the inner binary?
+    if( config.arg_immediate == true ) {
+        log_info( "Immediate flag set, starting new binary as this node's address (%08x)", config.arg_address );
+        assert( config.arg_address != 0, "Tried to start a new node in immediate mode without a valid address! STOP." );
+        autoSpawn( config.arg_address );
+    }
+
+    int autoprint = 0;
     int status = 0;
     while( status == 0 ) {
 
+        // Debug sink dump
+        fprintf( stderr, "Sinks:\n" );
+        khint_t iter = kh_begin( sinkTable );
+        while( iter != kh_end( sinkTable ) ) {
+            if( kh_exist( sinkTable, iter ) == 1 ) {
+                sink_context_t * tmp = &kh_value( sinkTable, iter );
+                fprintf(
+                    stderr,
+                    "\t%d -> %08x (%ld/%ld) [%ld/%ld]\n",
+                    iter,
+                    kh_key( sinkTable, iter ),
+                    tmp->bytes_in,
+                    tmp->bytes_out,
+                    tmp->packets_in,
+                    tmp->packets_out );
+            }
+            iter++;
+        }
+        fprintf( stderr, "\n" );
+
+        autoprint = 0;
         int rv = -1;
-        while( (rv = poll(stream_fd, MAX_INPUT_STREAMS, 100)) > -1 && status == 0 ) {
+        while( (rv = poll(stream_fd, MAX_INPUT_STREAMS, 100)) > -1 && status == 0 && ++autoprint < 1000 ) {
 
             /*for( int i=0; i<32; i++ )
                 fprintf( stderr, "%02x ", rx_buffer[i] );
-            fprintf( stderr, "\n" );*/
-
-            // Debug sink dump
-            /*fprintf( stderr, "Sinks:\n" );
-            khint_t iter = kh_begin( sinkTable );
-            while( iter != kh_end( sinkTable ) ) {
-                if( kh_exist( sinkTable, iter ) == 1 ) {
-                    sink_context_t * tmp = &kh_value( sinkTable, iter );
-                    fprintf(
-                        stderr,
-                        "\t%d -> %08x (%ld/%ld) [%ld/%ld]\n",
-                        iter,
-                        kh_key( sinkTable, iter ),
-                        tmp->bytes_in,
-                        tmp->bytes_out,
-                        tmp->packets_in,
-                        tmp->packets_out );
-                }
-                iter++;
-            }
             fprintf( stderr, "\n" );*/
 
             for( int index = 0; index < MAX_INPUT_STREAMS; index++ ) {
@@ -893,7 +922,6 @@ int main(int argc, char ** argv ) {
                         }
                     }
 
-                    
                     break;
                 }
 

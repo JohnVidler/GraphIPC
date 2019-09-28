@@ -66,8 +66,9 @@ typedef struct {
  * Context for a given connection to a running node or subgraph-router.
  */
 typedef struct {
-    int forward_policy;
     kvec_t( gnw_address_t ) forward;
+
+    int forward_policy;
     int bound_fd;
 
     int state;
@@ -297,13 +298,10 @@ void handle_packet( int fd, uint8_t * buffer, size_t length ) {
                     if( header.length == 5 )
                         packet_read_u32( next, &address_req );
 
-                    int status;
-                    khint_t hint = kh_put( gnw_address_t, address_table, address_req, &status );
+                    khint_t hint = kh_get( gnw_address_t, address_table, address_req );
                     context_t * context = &kh_value( address_table, hint );
 
-                    assert( context != NULL, "Null context!" );
-
-                    if( hint == kh_end(address_table) ) {
+                    if( hint == kh_end(address_table) || kh_exist( address_table, hint ) == 0 ) {
                         int status;
                         hint = kh_put( gnw_address_t, address_table, address_req, &status );
                         context = &kh_value( address_table, hint );
@@ -335,13 +333,15 @@ void handle_packet( int fd, uint8_t * buffer, size_t length ) {
 
                     printf( "%p, %p\n", address_table, srcHint );
 
-                    if( srcHint == kh_end(address_table) ) {
+                    if( srcHint == kh_end(address_table) || kh_exist( address_table, srcHint ) == 0 ) {
                         int status;
                         srcHint = kh_put( gnw_address_t, address_table, source, &status );
                         srcContext = &kh_value( address_table, srcHint );
                         assert( srcContext != NULL, "Context pointer was NULL!" );
                         setup_context( srcContext );
                     }
+                    
+                    assert( srcHint != kh_end(address_table), "Failed to actually put a new key :/" );
                     srcContext = &kh_value( address_table, srcHint );
 
                     kv_push( gnw_address_t, srcContext->forward, target );
@@ -399,13 +399,11 @@ void handle_packet( int fd, uint8_t * buffer, size_t length ) {
             }
 
             // Grab this entry
-            context_t * entry = &kh_value( address_table, hint );
+            context_t * entry = &(kh_value( address_table, hint ));
 
             // Update the stats
             entry->bytes_in += length;
             entry->packets_in ++;
-
-            log_debug( "IN-POLICY: %08x", entry->forward_policy );
 
             // TEST BROADCAST MODE ONLY
             // ToDo: This should look up the routing mode, then forward according to the policy to anything
@@ -569,7 +567,10 @@ void handle_event( int index, struct pollfd * pollStruct, uint8_t * buffer, ssiz
     size_t buffer_size = (local->buffer_tail - local->buffer);
     size_t remaining_buffer = (config.network_mtu * 20) - buffer_size;
 
-    memcpy( local->buffer_tail, buffer, length );
+    printf( "%ld < %ld\n", length, remaining_buffer );
+    assert( length < remaining_buffer, "BUFFER OVERFLOW" );
+
+    memmove( local->buffer_tail, buffer, length );
     local->buffer_tail += length;
     buffer_size += length;
 
@@ -642,6 +643,8 @@ int router_process() {
 
                 context_t * entry = &kh_value( address_table, iter );
 
+                assert( entry != NULL, "NULL ENTRY, STOP." );
+
                 // Has this been marked as dead?
                 if( entry->state == GNW_STATE_CLOSE ) {
                     fprintf( stderr, "{CLOSED}\n" );
@@ -654,7 +657,7 @@ int router_process() {
                 else {
                     switch( entry->forward_policy ) {
                         case GNW_POLICY_BROADCAST: fprintf( stderr, "{broadcast}" ); break;
-                        case GNW_POLICY_ANYCAST: fprintf( stderr, "{anycasy}" ); break;
+                        case GNW_POLICY_ANYCAST: fprintf( stderr, "{anycast}" ); break;
                         case GNW_POLICY_ROUNDROBIN: fprintf( stderr, "{round-robin}" ); break;
                         default: fprintf( stderr, "{BAD POLICY}" );
                     }

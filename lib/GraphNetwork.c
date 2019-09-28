@@ -113,8 +113,8 @@ void gnw_dumpPacket( FILE * fd, unsigned char * buffer, ssize_t length ) {
 void gnw_emitPacket( int fd, unsigned char * buffer, size_t length ) {
     
     // This is a kludge to prevent null-sends
-    if( length == 0 )
-        return;
+    /*if( length == 0 )
+        return;*/
 
 #ifdef PACKET_DEBUG
     fprintf( stderr, "    >>> " );
@@ -135,8 +135,7 @@ void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, s
 
     link_stats.dataPackets++;
 
-    //uint8_t * packet = (uint8_t *)malloc( length + 11 );
-    uint8_t packet[ length + 11 ];
+    uint8_t * packet = (uint8_t *)malloc( length + 11 );
     memset( packet, 0, length+11 ); // Remove for fast/dangerous mode!
     uint8_t * ptr = packet;
 
@@ -153,7 +152,7 @@ void gnw_emitDataPacket( int fd, gnw_address_t source, unsigned char * buffer, s
 
     gnw_emitPacket( fd, packet, length + 11 );
 
-    //free( packet );
+    free( packet );
 }
 
 /* Note: This is messy, why do I have two packet types, there should only be one, with a shared type-space!
